@@ -843,7 +843,7 @@ if [[ -f "${FILEPATH}" ]]; then
 		if [[ ! -f "${OUTDIR}/${vbmeta_img}" ]]; then
 			if ${BIN_7ZZ} l -ba "${FILEPATH}" 2>/dev/null | gawk '{print $NF}' | grep -q "^${vbmeta_img}$"; then
 				${BIN_7ZZ} e -y -- "${FILEPATH}" "${vbmeta_img}" 2>/dev/null >> "${TMPDIR}"/zip.log
-				[[ -f "${vbmeta_img}" ]] && mv "${vbmeta_img}" "${OUTDIR}/" && log_info "Extracted ${vbmeta_img}"
+				[[ -f "${vbmeta_img}" ]] && mv -n "${vbmeta_img}" "${OUTDIR}/" 2>/dev/null && log_info "Extracted ${vbmeta_img}"
 			fi
 		fi
 	done
@@ -911,10 +911,8 @@ get_bootimg_info() {
             rm -f "${unpack_err}"
             return 0
         else
-            local err_msg
-            err_msg=$(head -c 200 "${unpack_err}" 2>/dev/null | tr '\n' ' ')
             rm -f "${unpack_err}"
-            log_warn "AOSP unpack_bootimg.py failed for '${bootimg}': ${err_msg:-unknown error}. Falling back to manual parsing..."
+            log_info "Using manual parsing for '${bootimg}'"
         fi
     fi
 
@@ -1071,9 +1069,6 @@ _extract_ramdisk() {
 
 for image in boot vendor_boot vendor_kernel_boot init_boot recovery; do
     if [[ -f "${image}".img ]]; then
-        # Create working directories
-        mkdir -p "${image}/dtb" "${image}/dts"
-
         log_info "Extracting '${image}' content..."
 
         # Use get_bootimg_info which tries AOSP unpack_bootimg.py first,
@@ -1089,12 +1084,21 @@ for image in boot vendor_boot vendor_kernel_boot init_boot recovery; do
             ) || log_warn "magiskboot unpack also failed for ${image}"
         fi
 
+        # Create dtb/dts dirs after extraction (avoids conflict with unpack_bootimg.py dtb output)
+        mkdir -p "${image}/dtb" "${image}/dts"
+
         ## Extract ramdisk content
         # Look for single ramdisk file (AOSP names it 'ramdisk', we rename to ramdisk.cpio)
         ramdiskfile=""
         for rname in ramdisk.cpio ramdisk vendor_ramdisk.cpio vendor_ramdisk; do
             if [[ -f "${image}/${rname}" ]]; then
-                ramdiskfile="${image}/${rname}"
+                # Rename to .cpio to avoid conflict when creating ramdisk/ directory
+                if [[ "${rname}" == "ramdisk" || "${rname}" == "vendor_ramdisk" ]]; then
+                    mv "${image}/${rname}" "${image}/${rname}.cpio"
+                    ramdiskfile="${image}/${rname}.cpio"
+                else
+                    ramdiskfile="${image}/${rname}"
+                fi
                 break
             fi
         done
@@ -1207,7 +1211,7 @@ log_group_start "Partition Extraction"
 for p in $PARTITIONS; do
 	if ! echo "${p}" | grep -q "boot\|recovery\|dtbo\|vendor_boot\|vendor_kernel_boot\|init_boot\|tz"; then
 		if [[ -e "$p.img" ]]; then
-			mkdir "$p" 2> /dev/null || rm -rf "${p:?}"/*
+			mkdir -p "$p" 2> /dev/null || rm -rf "${p:?}"/*
 			log_info "Extracting $p partition..."
 
 			# Detect EROFS filesystem (magic 0xE0F5E1E2 at offset 1024)

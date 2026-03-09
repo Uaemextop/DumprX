@@ -41,6 +41,7 @@ class BuildProp(dict):
 			try:
 				text = file.read_text(encoding="utf-8")
 			except (PermissionError, OSError):
+				# Skip unreadable files (e.g. cpio-preserved Android permissions)
 				return
 
 		for prop in text.splitlines():

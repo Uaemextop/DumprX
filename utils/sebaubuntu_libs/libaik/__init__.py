@@ -43,6 +43,7 @@ def _split_cpio_archives(data: bytes) -> List[bytes]:
 			break
 		trailer_pos = data.find(_CPIO_TRAILER, offset)
 		if trailer_pos == -1:
+			# 110 = minimum cpio newc header size (6 magic + 8*13 fields + filename)
 			if len(data) - offset > 110:
 				archives.append(data[offset:])
 			break
@@ -202,17 +203,20 @@ class AIKManager:
 		# Decompress the full combined ramdisk
 		decompressed = self.path / "_full_vendor_ramdisk"
 		try:
-			if "lz4" in comp_type:
-				run(["lz4", "-dc", "-l", str(comp_file)],
-				    stdout=open(decompressed, "wb"), stderr=DEVNULL, check=True)
-			elif "gzip" in comp_type or "gz" in comp_type:
-				run(["gzip", "-dc", str(comp_file)],
-				    stdout=open(decompressed, "wb"), stderr=DEVNULL, check=True)
-			elif "zstd" in comp_type:
-				run(["zstd", "-dc", str(comp_file)],
-				    stdout=open(decompressed, "wb"), stderr=DEVNULL, check=True)
-			else:
-				return
+			with open(decompressed, "wb") as out_f:
+				if "lz4" in comp_type:
+					run(["lz4", "-dc", "-l", str(comp_file)],
+					    stdout=out_f, stderr=DEVNULL, check=True)
+				elif "gzip" in comp_type or "gz" in comp_type:
+					run(["gzip", "-dc", str(comp_file)],
+					    stdout=out_f, stderr=DEVNULL, check=True)
+				elif "zstd" in comp_type:
+					run(["zstd", "-dc", str(comp_file)],
+					    stdout=out_f, stderr=DEVNULL, check=True)
+				else:
+					out_f.close()
+					decompressed.unlink(missing_ok=True)
+					return
 		except Exception:
 			decompressed.unlink(missing_ok=True)
 			return
