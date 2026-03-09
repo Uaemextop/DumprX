@@ -1457,7 +1457,7 @@ commit_and_push(){
 		local apk_size=0
 		while IFS= read -r f; do
 			local fsize
-			fsize=$(stat -c%s "$f" 2>/dev/null || echo 0)
+			fsize=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
 			apk_size=$((apk_size + fsize))
 		done <<< "${apk_files}"
 
@@ -1478,21 +1478,18 @@ commit_and_push(){
 	# Add directories in order
 	for i in "${DIRS[@]}"; do
 		local dir_added=false
+		local dir_size=0
 		for prefix in "" "system/" "system/system/" "vendor/"; do
 			if [ -d "${prefix}${i}" ]; then
 				git add "${prefix}${i}"
 				dir_added=true
+				local prefix_size
+				prefix_size=$(du -sb "${prefix}${i}" 2>/dev/null | cut -f1 || echo 0)
+				dir_size=$((dir_size + prefix_size))
 			fi
 		done
 
 		if [ "$dir_added" = true ]; then
-			# Calculate size of staged changes
-			local staged_size
-			staged_size=$(git diff --cached --stat 2>/dev/null | tail -1 | grep -oP '\d+ insertion' | grep -oP '\d+' || echo 0)
-			# Approximate: use du for accuracy
-			local dir_size=0
-			[ -d "${i}" ] && dir_size=$(du -sb "${i}" 2>/dev/null | cut -f1 || echo 0)
-
 			git commit -sm "Add ${i} for ${description}"
 			current_chunk_size=$((current_chunk_size + dir_size))
 
@@ -1599,7 +1596,12 @@ if [[ -n "${GITHUB_TOKEN}" ]] && [[ "${PUSH_TO_GITLAB}" != "true" ]]; then
 
 	# Remove The Journal File Inside System/Vendor
 	find . -mindepth 2 -type d -name "\[SYS\]" -exec rm -rf {} \; 2>/dev/null
-	split_files 62M 47M
+
+	# Split large files into parts (.aa, .ab, .ac) only if explicitly enabled
+	if [[ "${SPLIT_LARGE_FILES}" == "true" ]]; then
+		log_info "Splitting large files into parts (enabled via SPLIT_LARGE_FILES)..."
+		split_files 62M 47M
+	fi
 
 	log_info "Final Repository Should Look Like..."
 	ls -lAog

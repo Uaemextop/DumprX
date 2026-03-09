@@ -29,6 +29,11 @@ on:
         description: 'Telegram chat ID for notifications'
         required: false
         type: string
+      SPLIT_LARGE_FILES:
+        description: 'Split large files into parts (.aa, .ab, .ac) instead of using Git LFS'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   dump:
@@ -108,6 +113,7 @@ jobs:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
           GITLAB_INSTANCE: ${{ inputs.GITLAB_INSTANCE }}
           PUSH_TO_GITLAB: ${{ inputs.PUSH_TO_GITLAB }}
+          SPLIT_LARGE_FILES: ${{ inputs.SPLIT_LARGE_FILES }}
           CI: true
         run: |
           chmod +x dumper.sh
