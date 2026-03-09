@@ -326,7 +326,7 @@ extract_mtk_preloader() {
         cp "${preloader_img}" preloader/
         # Parse preloader header for device info
         local preloader_name
-        preloader_name=$(strings "${preloader_img}" 2>/dev/null | grep -i "NAME" | head -1)
+        preloader_name=$(strings "${preloader_img}" 2>/dev/null | grep -iE "^NAME=|PRELOADER" | head -1)
         [[ -n "${preloader_name}" ]] && echo "${preloader_name}" > preloader/preloader_info.txt
     fi
 }
@@ -352,7 +352,7 @@ extract_mtk_logo() {
 # Extract MTK scatter file info (if present in firmware)
 extract_mtk_scatter() {
     local scatter_file
-    scatter_file=$(find "${TMPDIR}" -maxdepth 2 -iname "*scatter*" -o -iname "MT*.txt" 2>/dev/null | head -1)
+    scatter_file=$(find "${TMPDIR}" -maxdepth 2 \( -iname "*scatter*" -o -iname "MT*.txt" \) 2>/dev/null | head -1)
     if [[ -n "${scatter_file}" && -f "${scatter_file}" ]]; then
         log_info "MTK scatter file detected: $(basename "${scatter_file}")"
         cp "${scatter_file}" "${OUTDIR}/scatter.txt"
@@ -1256,7 +1256,7 @@ fi
 for p in $PARTITIONS; do
 	if ! echo "${p}" | grep -q "boot\|recovery\|dtbo\|vendor_boot\|vendor_kernel_boot\|init_boot\|tz"; then
 		if [[ -e "$p.img" ]]; then
-			mkdir -p "$p" 2>/dev/null || rm -rf "${p:?}"/*
+			rm -rf "${p:?}" 2>/dev/null; mkdir -p "$p"
 			log_info "Extracting $p partition..."
 			if ${BIN_7ZZ} x -snld "$p".img -y -o"$p"/ > /dev/null 2>&1; then
 				rm -f "$p".img > /dev/null 2>&1
@@ -1270,15 +1270,14 @@ for p in $PARTITIONS; do
 						rm -f "$p".img > /dev/null 2>&1
 					else
 						log_info "Extracting $p with mount loop..."
-						sudo mount -o loop -t auto "$p".img "$p" 2>/dev/null
-						mkdir -p "${p}_"
-						sudo cp -rf "${p}/"* "${p}_" 2>/dev/null
-						sudo umount "${p}" 2>/dev/null
-						sudo cp -rf "${p}_/"* "${p}" 2>/dev/null
-						sudo rm -rf "${p}_"
-						sudo chown -R "$(whoami)" "${p}"/* 2>/dev/null
-						chmod -R u+rwX "${p}"/* 2>/dev/null
-						if [ $? -eq 0 ]; then
+						if sudo mount -o loop,ro -t auto "$p".img "$p" 2>/dev/null; then
+							mkdir -p "${p}_"
+							sudo cp -rf "${p}/"* "${p}_" 2>/dev/null
+							sudo umount "${p}" 2>/dev/null
+							sudo cp -rf "${p}_/"* "${p}" 2>/dev/null
+							sudo rm -rf "${p}_"
+							sudo chown -R "$(whoami)" "${p}"/* 2>/dev/null
+							chmod -R u+rwX "${p}"/* 2>/dev/null
 							rm -f "$p".img > /dev/null 2>&1
 						else
 							log_warn "Could not extract $p partition. It might use an unsupported filesystem."
