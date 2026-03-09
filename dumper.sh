@@ -2037,7 +2037,7 @@ elif [[ -n "${GITLAB_TOKEN}" ]]; then
 	PROJECT_ID=$(get_gitlab_project_id "${codename}" "${SUBGRP_ID}")
 
 	# Commit and Push
-	git remote add origin git@${GITLAB_INSTANCE}:${GIT_ORG}/${repo}.git
+	git remote add origin https://oauth2:${GITLAB_TOKEN}@${GITLAB_INSTANCE}/${GIT_ORG}/${repo}.git
 
 	# Ensure that the target repo is public
     curl -s \
