@@ -1046,7 +1046,7 @@ _extract_ramdisk() {
     local magic
     magic=$(od -A n -tx1 -N 4 "${src}" 2>/dev/null | tr -d ' ')
     case "${magic}" in
-        04224d18|02214c18)  # LZ4 (standard frame 04224d18 or legacy 02214c18)
+        04224d18|02214c18)  # LZ4: standard frame (04224d18) or legacy (02214c18, used by MTK/Motorola firmware)
             lz4 -dc "${src}" > "${src}_decompressed" 2>/dev/null && \
                 ${BIN_7ZZ} -snld x "${src}_decompressed" -o"${dst}" > /dev/null 2>&1
             rm -f "${src}_decompressed"
@@ -1211,6 +1211,7 @@ for p in $PARTITIONS; do
 			log_info "Extracting $p partition..."
 
 			# Detect EROFS filesystem (magic 0xE0F5E1E2 at offset 1024)
+			# Bytes on disk are little-endian: e2 e1 f5 e0
 			is_erofs=false
 			if [[ -f "$p.img" ]]; then
 				erofs_magic=$(od -A n -tx1 -N 4 -j 1024 "$p".img 2>/dev/null | tr -d ' ')
@@ -1278,8 +1279,10 @@ done
 log_group_end
 
 # Remove Unnecessary Image Leftover From OUTDIR
+# Keep boot/recovery/dtbo/tz/vbmeta and MTK firmware images
+MTK_KEEP_PATTERN=$(echo ${MTK_FW_PARTITIONS} | tr ' ' '|')
 for q in *.img; do
-	if ! echo "${q}" | grep -q "boot\|recovery\|dtbo\|tz\|vbmeta\|lk\|gz\|scp\|sspm\|spmfw\|tee\|logo\|preloader"; then
+	if ! echo "${q}" | grep -qE "boot|recovery|dtbo|tz|vbmeta|${MTK_KEEP_PATTERN}"; then
 		rm -f "${q}" 2>/dev/null
 	fi
 done
@@ -1550,9 +1553,13 @@ else
 fi
 if [[ -f ${twrpimg} ]]; then
 	mkdir -p $twrpdtout
-	# Use local twrpdtgen with local sebaubuntu_libs
-	PYTHONPATH="${UTILSDIR}:${PYTHONPATH:-}" python3 -m twrpdtgen $twrpimg -o $twrpdtout 2>&1 || \
-		uvx --from git+https://github.com/twrpdtgen/twrpdtgen@master twrpdtgen $twrpimg -o $twrpdtout 2>&1 || true
+	# Use local twrpdtgen with local sebaubuntu_libs, fall back to uvx
+	if ! PYTHONPATH="${UTILSDIR}:${PYTHONPATH:-}" python3 -m twrpdtgen $twrpimg -o $twrpdtout 2>&1; then
+		log_warn "Local twrpdtgen failed, trying uvx fallback..."
+		if ! uvx --from git+https://github.com/twrpdtgen/twrpdtgen@master twrpdtgen $twrpimg -o $twrpdtout 2>&1; then
+			log_warn "TWRP device tree generation failed for ${twrpimg}"
+		fi
+	fi
 	if [[ -d "${twrpdtout}" ]]; then
 		[[ ! -e "${OUTDIR}"/twrp-device-tree/README.md ]] && curl -sL https://raw.githubusercontent.com/wiki/SebaUbuntu/TWRP-device-tree-generator/4.-Build-TWRP-from-source.md > ${twrpdtout}/README.md 2>/dev/null
 	fi
@@ -1570,9 +1577,13 @@ find "$OUTDIR" -type f -printf '%P\n' | sort | grep -v ".git/" > "$OUTDIR"/all_f
 if [[ "$treble_support" = true ]]; then
         aospdtout="aosp-device-tree"
         mkdir -p $aospdtout
-        # Use local aospdtgen with local sebaubuntu_libs
-        PYTHONPATH="${UTILSDIR}:${PYTHONPATH:-}" python3 -m aospdtgen $OUTDIR -o $aospdtout 2>&1 || \
-            uvx aospdtgen $OUTDIR -o $aospdtout 2>&1 || true
+        # Use local aospdtgen with local sebaubuntu_libs, fall back to uvx
+        if ! PYTHONPATH="${UTILSDIR}:${PYTHONPATH:-}" python3 -m aospdtgen $OUTDIR -o $aospdtout 2>&1; then
+            log_warn "Local aospdtgen failed, trying uvx fallback..."
+            if ! uvx aospdtgen $OUTDIR -o $aospdtout 2>&1; then
+                log_warn "AOSP device tree generation failed"
+            fi
+        fi
 
         # Remove all .git directories from aospdtout
         rm -rf $(find $aospdtout -type d -name ".git")
