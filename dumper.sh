@@ -23,6 +23,7 @@ if [[ "${CI}" == "true" ]]; then
 	log_warn()    { echo "::warning::⚠️  $*"; }
 	log_error()   { echo "::error::❌ $*"; }
 	log_step()    { echo "::notice::🔹 $*"; }
+	log_debug()   { [[ "${DUMPR_DEBUG}" == "true" ]] && echo "::debug::🐛 $*" || true; }
 	log_group_start() { echo "::group::$*"; }
 	log_group_end()   { echo "::endgroup::"; }
 else
@@ -39,6 +40,7 @@ else
 	log_warn()    { printf "${YELLOW}[WARN]${NC}    %s\n" "$*"; }
 	log_error()   { printf "${RED}[ERROR]${NC}   %s\n" "$*"; }
 	log_step()    { printf "${CYAN}[STEP]${NC}    %s\n" "$*"; }
+	log_debug()   { [[ "${DUMPR_DEBUG}" == "true" ]] && printf "${PURPLE}[DEBUG]${NC}   %s\n" "$*" || true; }
 	log_group_start() { printf "\n${BOLD}${PURPLE}━━━ %s ━━━${NC}\n" "$*"; }
 	log_group_end()   { :; }
 fi
@@ -176,6 +178,9 @@ FSCK_EROFS=${UTILSDIR}/bin/fsck.erofs
 # Partition List That Are Currently Supported
 PARTITIONS="system system_ext system_other systemex vendor cust odm oem factory product xrom modem dtbo dtb boot vendor_boot recovery tz oppo_product preload_common opproduct reserve india my_preload my_odm my_stock my_operator my_country my_product my_company my_engineering my_heytap my_custom my_manifest my_carrier my_region my_bigball my_version special_preload system_dlkm vendor_dlkm odm_dlkm init_boot vendor_kernel_boot odmko socko nt_log mi_ext hw_product product_h preas preavs"
 EXT4PARTITIONS="system vendor cust odm oem factory product xrom systemex oppo_product preload_common hw_product product_h preas preavs"
+
+# MTK-specific firmware images (not filesystem partitions, but important for dump)
+MTK_FW_PARTITIONS="lk gz scp sspm spmfw tee logo preloader"
 OTHERPARTITIONS="tz.mbn:tz tz.img:tz modem.img:modem NON-HLOS:modem boot-verified.img:boot recovery-verified.img:recovery dtbo-verified.img:dtbo"
 
 # NOTE: $(pwd) is ${PROJECT_DIR}
@@ -279,10 +284,16 @@ function superimage_extract() {
         mv super.img super.img.raw
     fi
     for partition in $PARTITIONS; do
-        ($LPUNPACK --partition="$partition"_a super.img.raw || $LPUNPACK --partition="$partition" super.img.raw) 2>/dev/null
+        # Try _a suffix first (A/B devices), then without suffix
+        # Redirect stderr to filter lpunpack warnings, only show extraction progress
+        if $LPUNPACK --partition="${partition}"_a super.img.raw 2>/dev/null; then
+            log_info "Extracted ${partition}_a from super"
+        elif $LPUNPACK --partition="${partition}" super.img.raw 2>/dev/null; then
+            log_info "Extracted ${partition} from super"
+        fi
         if [ -f "$partition"_a.img ]; then
             mv "$partition"_a.img "$partition".img
-        else
+        elif [ ! -f "$partition".img ]; then
             foundpartitions=$(${BIN_7ZZ} l -ba "${FILEPATH}" | rev | gawk '{ print $1 }' | rev | grep $partition.img)
             ${BIN_7ZZ} e -y "${FILEPATH}" $foundpartitions dummypartition 2>/dev/null >> $TMPDIR/zip.log
         fi
@@ -785,6 +796,63 @@ done
 cd "${OUTDIR}"/ || exit
 rm -rf "${TMPDIR:?}"/*
 
+# ── MTK-specific firmware image handling ──
+# Extract and preserve MTK scatter file, preloader, DA, and firmware images
+# These are common in Motorola/Lenovo MTK devices (fastboot format)
+if [[ -f "${FILEPATH}" ]]; then
+	# Extract MTK scatter file if present
+	for scatter_name in $(${BIN_7ZZ} l -ba "${FILEPATH}" 2>/dev/null | gawk '{print $NF}' | grep -i "Android_scatter"); do
+		if [[ -n "${scatter_name}" ]]; then
+			log_info "MTK scatter file detected: ${scatter_name}"
+			${BIN_7ZZ} e -y -- "${FILEPATH}" "${scatter_name}" -o"${OUTDIR}" 2>/dev/null >> "${TMPDIR}"/zip.log
+		fi
+	done
+
+	# Extract MTK firmware images (lk, gz, scp, sspm, spmfw, tee, logo, preloader)
+	for mtk_part in ${MTK_FW_PARTITIONS}; do
+		if ${BIN_7ZZ} l -ba "${FILEPATH}" 2>/dev/null | gawk '{print $NF}' | grep -q "^${mtk_part}\.img$\|^${mtk_part}_.*\.img$\|^${mtk_part}_.*\.bin$"; then
+			mtk_found=$(${BIN_7ZZ} l -ba "${FILEPATH}" | gawk '{print $NF}' | grep "^${mtk_part}\.img$\|^${mtk_part}_.*\.img$\|^${mtk_part}_.*\.bin$" | head -1)
+			if [[ -n "${mtk_found}" ]] && [[ ! -f "${OUTDIR}/${mtk_part}.img" ]]; then
+				${BIN_7ZZ} e -y -- "${FILEPATH}" "${mtk_found}" 2>/dev/null >> "${TMPDIR}"/zip.log
+				# Move to OUTDIR with proper name
+				extracted_file=$(basename "${mtk_found}")
+				if [[ -f "${extracted_file}" ]]; then
+					mv "${extracted_file}" "${OUTDIR}/${mtk_part}.img" 2>/dev/null
+					log_info "Extracted MTK firmware image: ${mtk_part}"
+				fi
+			fi
+		fi
+	done
+
+	# Extract MTK Download Agent (.bin) and preloader .bin
+	for bin_pattern in "DA_*.bin" "preloader_*.bin"; do
+		for bin_found in $(${BIN_7ZZ} l -ba "${FILEPATH}" 2>/dev/null | gawk '{print $NF}' | grep "${bin_pattern}"); do
+			if [[ -n "${bin_found}" ]]; then
+				${BIN_7ZZ} e -y -- "${FILEPATH}" "${bin_found}" 2>/dev/null >> "${TMPDIR}"/zip.log
+				extracted_file=$(basename "${bin_found}")
+				if [[ -f "${extracted_file}" ]]; then
+					mv "${extracted_file}" "${OUTDIR}/" 2>/dev/null
+					log_info "Extracted MTK binary: ${extracted_file}"
+				fi
+			fi
+		done
+	done
+
+	# Extract vbmeta images if not already present
+	for vbmeta_img in vbmeta.img vbmeta_system.img vbmeta_vendor.img; do
+		if [[ ! -f "${OUTDIR}/${vbmeta_img}" ]]; then
+			if ${BIN_7ZZ} l -ba "${FILEPATH}" 2>/dev/null | gawk '{print $NF}' | grep -q "^${vbmeta_img}$"; then
+				${BIN_7ZZ} e -y -- "${FILEPATH}" "${vbmeta_img}" 2>/dev/null >> "${TMPDIR}"/zip.log
+				[[ -f "${vbmeta_img}" ]] && mv "${vbmeta_img}" "${OUTDIR}/" && log_info "Extracted ${vbmeta_img}"
+			fi
+		fi
+	done
+fi
+
+# Fix permissions on extracted files (prevents EACCES errors in CI artifact upload)
+find "${OUTDIR}" -type d -exec chmod u+rwx {} + 2>/dev/null
+find "${OUTDIR}" -type f -exec chmod u+rw {} + 2>/dev/null
+
 get_bootimg_info() {
     local bootimg="$1"
     local tempdir="$2"
@@ -792,11 +860,15 @@ get_bootimg_info() {
     # ── Primary: AOSP unpack_bootimg.py (Android 16, supports headers v0-v4) ──
     if [[ -f "${UNPACK_BOOTIMG}" ]]; then
         local info_file="${tempdir}/bootimg_info.txt"
-        if python3 "${UNPACK_BOOTIMG}" --boot_img "${bootimg}" --out "${tempdir}" --format info > "${info_file}" 2>/dev/null; then
+        local unpack_err="${tempdir}/unpack_err.log"
+        if python3 "${UNPACK_BOOTIMG}" --boot_img "${bootimg}" --out "${tempdir}" --format info > "${info_file}" 2>"${unpack_err}"; then
             log_info "Parsed '${bootimg}' via AOSP unpack_bootimg.py (Android 16)"
 
             # Rename AOSP output files to match expected names
+            # boot/init_boot: ramdisk -> ramdisk.cpio
             [[ -f "${tempdir}/ramdisk" ]] && mv "${tempdir}/ramdisk" "${tempdir}/ramdisk.cpio"
+            # vendor_boot v3: vendor_ramdisk -> vendor_ramdisk.cpio
+            [[ -f "${tempdir}/vendor_ramdisk" ]] && mv "${tempdir}/vendor_ramdisk" "${tempdir}/vendor_ramdisk.cpio"
 
             # Generate mkbootimg args for repacking reference
             python3 "${UNPACK_BOOTIMG}" --boot_img "${bootimg}" --out "${tempdir}" --format mkbootimg > "${tempdir}/mkbootimg_args.txt" 2>/dev/null || true
@@ -804,9 +876,12 @@ get_bootimg_info() {
             # Write img_info from the pretty-print output
             {
                 local header_ver kernel_sz ramdisk_sz pg_size
-                header_ver=$(grep -oP 'boot image header version: \K\d+' "${info_file}" || echo "0")
+                header_ver=$(grep -oP 'boot image header version: \K\d+' "${info_file}" || \
+                             grep -oP 'vendor boot image header version: \K\d+' "${info_file}" || echo "0")
                 kernel_sz=$(grep -oP 'kernel_size: \K\d+' "${info_file}" || echo "0")
                 ramdisk_sz=$(grep -oP 'ramdisk size: \K\d+' "${info_file}" || echo "0")
+                # Also try vendor boot ramdisk size format
+                [[ "$ramdisk_sz" == "0" ]] && ramdisk_sz=$(grep -oP 'vendor ramdisk (?:total )?size: \K\d+' "${info_file}" || echo "0")
                 pg_size=$(grep -oP 'page size: \K\d+' "${info_file}" || echo "4096")
                 local os_ver os_patch cmdline board
                 os_ver=$(grep -oP 'os version: \K.*' "${info_file}" || true)
@@ -833,9 +908,13 @@ get_bootimg_info() {
                 fi
             } > "$tempdir/img_info"
 
+            rm -f "${unpack_err}"
             return 0
         else
-            log_warn "AOSP unpack_bootimg.py failed for '${bootimg}', falling back to manual parsing..."
+            local err_msg
+            err_msg=$(head -c 200 "${unpack_err}" 2>/dev/null | tr '\n' ' ')
+            rm -f "${unpack_err}"
+            log_warn "AOSP unpack_bootimg.py failed for '${bootimg}': ${err_msg:-unknown error}. Falling back to manual parsing..."
         fi
     fi
 
@@ -949,6 +1028,47 @@ get_bootimg_info() {
 
 # Extract and decompile device-tree blobs
 log_group_start "Boot Image Extraction"
+
+# Helper: decompress a ramdisk file into a target directory
+_extract_ramdisk() {
+    local src="$1"
+    local dst="$2"
+    local src_size
+    src_size=$(stat -c%s "${src}" 2>/dev/null || echo "0")
+
+    # Skip empty ramdisks (e.g. boot.img v4 has 0-byte ramdisk, normal)
+    if [[ "${src_size}" -le 0 ]]; then
+        log_debug "Skipping empty ramdisk: ${src}"
+        return 0
+    fi
+
+    mkdir -p "${dst}"
+    local magic
+    magic=$(od -A n -tx1 -N 4 "${src}" 2>/dev/null | tr -d ' ')
+    case "${magic}" in
+        04224d18|02214c18)  # LZ4 (standard frame 04224d18 or legacy 02214c18)
+            lz4 -dc "${src}" > "${src}_decompressed" 2>/dev/null && \
+                ${BIN_7ZZ} -snld x "${src}_decompressed" -o"${dst}" > /dev/null 2>&1
+            rm -f "${src}_decompressed"
+            ;;
+        1f8b*)     # GZIP
+            ${BIN_7ZZ} -snld x "${src}" -o"${dst}" > /dev/null 2>&1
+            ;;
+        28b52ffd)  # ZSTD
+            zstd -d "${src}" -o "${src}_decompressed" 2>/dev/null && \
+                ${BIN_7ZZ} -snld x "${src}_decompressed" -o"${dst}" > /dev/null 2>&1
+            rm -f "${src}_decompressed"
+            ;;
+        30373037|3037303[12])  # CPIO (uncompressed, magic "0707")
+            ${BIN_7ZZ} -snld x "${src}" -o"${dst}" > /dev/null 2>&1
+            ;;
+        *)         # Try 7z as generic fallback
+            ${BIN_7ZZ} -snld x "${src}" -o"${dst}" > /dev/null 2>&1 || \
+                log_warn "Failed to extract ramdisk from $(basename "${src}") (format: ${magic})"
+            ;;
+    esac
+}
+
 for image in boot vendor_boot vendor_kernel_boot init_boot recovery; do
     if [[ -f "${image}".img ]]; then
         # Create working directories
@@ -970,9 +1090,9 @@ for image in boot vendor_boot vendor_kernel_boot init_boot recovery; do
         fi
 
         ## Extract ramdisk content
-        # Look for ramdisk file (AOSP names it 'ramdisk', we rename to ramdisk.cpio)
+        # Look for single ramdisk file (AOSP names it 'ramdisk', we rename to ramdisk.cpio)
         ramdiskfile=""
-        for rname in ramdisk.cpio ramdisk vendor_ramdisk; do
+        for rname in ramdisk.cpio ramdisk vendor_ramdisk.cpio vendor_ramdisk; do
             if [[ -f "${image}/${rname}" ]]; then
                 ramdiskfile="${image}/${rname}"
                 break
@@ -980,35 +1100,34 @@ for image in boot vendor_boot vendor_kernel_boot init_boot recovery; do
         done
 
         if [[ -n "${ramdiskfile}" ]]; then
+            _extract_ramdisk "${ramdiskfile}" "${image}/ramdisk"
+        fi
+
+        # Handle vendor_boot with multiple ramdisk fragments (header v4)
+        # AOSP unpack_bootimg.py extracts them as vendor_ramdisk00, vendor_ramdisk01, etc.
+        has_multi_ramdisk=false
+        for vrd in "${image}"/vendor_ramdisk[0-9][0-9]; do
+            if [[ -f "${vrd}" ]]; then
+                has_multi_ramdisk=true
+                vrd_name=$(basename "${vrd}")
+                log_info "Extracting vendor ramdisk fragment '${vrd_name}' from '${image}'..."
+                _extract_ramdisk "${vrd}" "${image}/ramdisk_${vrd_name}"
+            fi
+        done
+
+        # If no single ramdisk was found but multi-ramdisks exist, combine into main ramdisk dir
+        if [[ "${has_multi_ramdisk}" == true && -z "${ramdiskfile}" ]]; then
             mkdir -p "${image}/ramdisk"
-            # Detect compression format and decompress accordingly
-            ramdisk_magic=$(od -A n -tx1 -N 4 "${ramdiskfile}" 2>/dev/null | tr -d ' ')
-            case "${ramdisk_magic}" in
-                04224d18)  # LZ4
-                    unlz4 "${ramdiskfile}" "${image}/ramdisk_decompressed" 2>/dev/null && \
-                        ${BIN_7ZZ} -snld x "${image}/ramdisk_decompressed" -o"${image}/ramdisk" > /dev/null 2>&1
-                    rm -f "${image}/ramdisk_decompressed"
-                    ;;
-                1f8b*)     # GZIP
-                    ${BIN_7ZZ} -snld x "${ramdiskfile}" -o"${image}/ramdisk" > /dev/null 2>&1
-                    ;;
-                28b52ffd)  # ZSTD
-                    zstd -d "${ramdiskfile}" -o "${image}/ramdisk_decompressed" 2>/dev/null && \
-                        ${BIN_7ZZ} -snld x "${image}/ramdisk_decompressed" -o"${image}/ramdisk" > /dev/null 2>&1
-                    rm -f "${image}/ramdisk_decompressed"
-                    ;;
-                30373037)  # CPIO (uncompressed, magic "0707")
-                    ${BIN_7ZZ} -snld x "${ramdiskfile}" -o"${image}/ramdisk" > /dev/null 2>&1
-                    ;;
-                *)         # Try 7z as generic fallback
-                    ${BIN_7ZZ} -snld x "${ramdiskfile}" -o"${image}/ramdisk" > /dev/null 2>&1 || \
-                        log_warn "Failed to extract ramdisk for ${image} (unknown format: ${ramdisk_magic})"
-                    ;;
-            esac
+            for vrd_dir in "${image}"/ramdisk_vendor_ramdisk[0-9][0-9]; do
+                if [[ -d "${vrd_dir}" ]]; then
+                    cp -a "${vrd_dir}"/. "${image}/ramdisk/" 2>/dev/null
+                fi
+            done
         fi
 
         ## Clean-up raw ramdisk files (keep extracted ramdisk/ directory)
-        rm -f "${image}/ramdisk.cpio" "${image}/ramdisk_decompressed" 2>/dev/null
+        rm -f "${image}/ramdisk.cpio" "${image}/ramdisk_decompressed" \
+              "${image}/vendor_ramdisk.cpio" 2>/dev/null
 
         # Extract DTBs via 'extract-dtb'
         log_info "Extracting device-tree(s) from '${image}'..."
@@ -1084,39 +1203,71 @@ if [[ -f dtbo.img ]]; then
 fi
 
 # Extract Partitions
+log_group_start "Partition Extraction"
 for p in $PARTITIONS; do
 	if ! echo "${p}" | grep -q "boot\|recovery\|dtbo\|vendor_boot\|vendor_kernel_boot\|init_boot\|tz"; then
 		if [[ -e "$p.img" ]]; then
 			mkdir "$p" 2> /dev/null || rm -rf "${p:?}"/*
 			log_info "Extracting $p partition..."
-			${BIN_7ZZ} x -snld "$p".img -y -o"$p"/ > /dev/null 2>&1
-			if [ $? -eq 0 ]; then
-				rm "$p".img > /dev/null 2>&1
-			else
-				# Handling EROFS Images, which can't be handled by 7z.
-				log_warn "Extraction failed with 7z"
-				if [ -f $p.img ] && [ $p != "modem" ]; then
-					log_info "Extracting $p with fsck.erofs..."
-					rm -rf "${p}"/*
-					"${FSCK_EROFS}" --extract="$p" "$p".img
-					if [ $? -eq 0 ]; then
-						rm -fv "$p".img > /dev/null 2>&1
-					else
-						log_info "Extracting $p with mount loop..."
-						sudo mount -o loop -t auto "$p".img "$p"
-						mkdir "${p}_"
+
+			# Detect EROFS filesystem (magic 0xE0F5E1E2 at offset 1024)
+			is_erofs=false
+			if [[ -f "$p.img" ]]; then
+				erofs_magic=$(od -A n -tx1 -N 4 -j 1024 "$p".img 2>/dev/null | tr -d ' ')
+				[[ "$erofs_magic" == "e2e1f5e0" ]] && is_erofs=true
+			fi
+
+			if [[ "${is_erofs}" == true ]]; then
+				# EROFS filesystem: use fsck.erofs directly (skip 7z to avoid noisy failure)
+				log_info "Detected EROFS filesystem for $p"
+				rm -rf "${p}"/*
+				"${FSCK_EROFS}" --extract="$p" "$p".img > /dev/null 2>&1
+				if [ $? -eq 0 ]; then
+					rm -f "$p".img > /dev/null 2>&1
+					log_success "Extracted $p (EROFS)"
+				else
+					log_info "fsck.erofs failed for $p, trying mount loop..."
+					sudo mount -o loop,ro -t erofs "$p".img "$p" 2>/dev/null && {
+						mkdir -p "${p}_"
 						sudo cp -rf "${p}/"* "${p}_"
 						sudo umount "${p}"
+						rm -rf "${p:?}"/*
 						sudo cp -rf "${p}_/"* "${p}"
 						sudo rm -rf "${p}_"
 						sudo chown -R "$(whoami)" "${p}"/*
 						chmod -R u+rwX "${p}"/*
+						rm -f "$p".img > /dev/null 2>&1
+					} || log_warn "Could not extract $p (EROFS). Requires Linux 5.4+ kernel."
+				fi
+			else
+				# Try 7z first (handles ext4, raw images, etc.)
+				${BIN_7ZZ} x -snld "$p".img -y -o"$p"/ > /dev/null 2>&1
+				if [ $? -eq 0 ]; then
+					rm "$p".img > /dev/null 2>&1
+				else
+					# 7z failed; try fsck.erofs as fallback (could be erofs variant)
+					if [ -f $p.img ] && [ $p != "modem" ]; then
+						log_info "Trying fsck.erofs for $p..."
+						rm -rf "${p}"/*
+						"${FSCK_EROFS}" --extract="$p" "$p".img > /dev/null 2>&1
 						if [ $? -eq 0 ]; then
-							rm -fv "$p".img > /dev/null 2>&1
+							rm -f "$p".img > /dev/null 2>&1
 						else
-							log_warn "Could not extract $p partition. It might use an unsupported filesystem."
-							echo "For EROFS: make sure you're using Linux 5.4+ kernel."
-							echo "For F2FS: make sure you're using Linux 5.15+ kernel."
+							log_info "Trying mount loop for $p..."
+							sudo mount -o loop -t auto "$p".img "$p" 2>/dev/null
+							if [ $? -eq 0 ]; then
+								mkdir -p "${p}_"
+								sudo cp -rf "${p}/"* "${p}_"
+								sudo umount "${p}"
+								rm -rf "${p:?}"/*
+								sudo cp -rf "${p}_/"* "${p}"
+								sudo rm -rf "${p}_"
+								sudo chown -R "$(whoami)" "${p}"/*
+								chmod -R u+rwX "${p}"/*
+								rm -f "$p".img > /dev/null 2>&1
+							else
+								log_warn "Could not extract $p partition. Unsupported filesystem."
+							fi
 						fi
 					fi
 				fi
@@ -1124,10 +1275,11 @@ for p in $PARTITIONS; do
 		fi
 	fi
 done
+log_group_end
 
 # Remove Unnecessary Image Leftover From OUTDIR
 for q in *.img; do
-	if ! echo "${q}" | grep -q "boot\|recovery\|dtbo\|tz"; then
+	if ! echo "${q}" | grep -q "boot\|recovery\|dtbo\|tz\|vbmeta\|lk\|gz\|scp\|sspm\|spmfw\|tee\|logo\|preloader"; then
 		rm -f "${q}" 2>/dev/null
 	fi
 done
@@ -1537,6 +1689,7 @@ commit_and_push(){
 	local CHUNK_LIMIT=$((2 * 1024 * 1024 * 1024))  # 2GB in bytes
 	local current_chunk_size=0
 	local chunk_num=1
+	local push_failed=false
 
 	local DIRS=(
 		"system_ext"
@@ -1568,7 +1721,10 @@ commit_and_push(){
 
 		if [ "$current_chunk_size" -ge "$CHUNK_LIMIT" ]; then
 			log_info "Chunk ${chunk_num} size: $((current_chunk_size / 1024 / 1024))MB - pushing..."
-			git push -u origin "${branch}"
+			if ! git push -u origin "${branch}"; then
+				log_warn "Failed to push chunk ${chunk_num}"
+				push_failed=true
+			fi
 			current_chunk_size=0
 			chunk_num=$((chunk_num + 1))
 			log_group_end
@@ -1596,7 +1752,10 @@ commit_and_push(){
 
 			if [ "$current_chunk_size" -ge "$CHUNK_LIMIT" ]; then
 				log_info "Chunk ${chunk_num} size: $((current_chunk_size / 1024 / 1024))MB - pushing..."
-				git push -u origin "${branch}"
+				if ! git push -u origin "${branch}"; then
+					log_warn "Failed to push chunk ${chunk_num}"
+					push_failed=true
+				fi
 				current_chunk_size=0
 				chunk_num=$((chunk_num + 1))
 				log_group_end
@@ -1610,9 +1769,16 @@ commit_and_push(){
 	git commit -sm "Add extras for ${description}"
 
 	log_info "Final push (chunk ${chunk_num})..."
-	git push -u origin "${branch}"
+	if ! git push -u origin "${branch}"; then
+		log_warn "Failed to push final chunk"
+		push_failed=true
+	fi
 	log_group_end
-	log_success "All firmware files pushed successfully"
+	if [[ "${push_failed}" == true ]]; then
+		log_warn "Some pushes failed. Check git credentials and repository access."
+	else
+		log_success "All firmware files pushed successfully"
+	fi
 }
 
 split_files(){
