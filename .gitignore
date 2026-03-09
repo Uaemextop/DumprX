@@ -2,6 +2,9 @@
 .github_orgname
 .tg_token
 .tg_chat
+.gitlab_token
+.gitlab_group
+.gitlab_instance
 .venv/
 input/
 tmp/
