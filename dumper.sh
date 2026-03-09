@@ -23,6 +23,7 @@ if [[ "${CI}" == "true" ]]; then
 	log_warn()    { echo "::warning::⚠️  $*"; }
 	log_error()   { echo "::error::❌ $*"; }
 	log_step()    { echo "::notice::🔹 $*"; }
+	log_debug()   { [[ "${DEBUG}" == "true" ]] && echo "::debug::🔍 $*" || true; }
 	log_group_start() { echo "::group::$*"; }
 	log_group_end()   { echo "::endgroup::"; }
 else
@@ -32,6 +33,7 @@ else
 	BLUE='\033[0;34m'
 	PURPLE='\033[0;35m'
 	CYAN='\033[0;36m'
+	GRAY='\033[0;90m'
 	BOLD='\033[1m'
 	NC='\033[0m'
 	log_info()    { printf "${BLUE}[INFO]${NC}    %s\n" "$*"; }
@@ -39,6 +41,7 @@ else
 	log_warn()    { printf "${YELLOW}[WARN]${NC}    %s\n" "$*"; }
 	log_error()   { printf "${RED}[ERROR]${NC}   %s\n" "$*"; }
 	log_step()    { printf "${CYAN}[STEP]${NC}    %s\n" "$*"; }
+	log_debug()   { [[ "${DEBUG}" == "true" ]] && printf "${GRAY}[DEBUG]${NC}   %s\n" "$*" || true; }
 	log_group_start() { printf "\n${BOLD}${PURPLE}━━━ %s ━━━${NC}\n" "$*"; }
 	log_group_end()   { :; }
 fi
@@ -279,15 +282,142 @@ function superimage_extract() {
         mv super.img super.img.raw
     fi
     for partition in $PARTITIONS; do
-        ($LPUNPACK --partition="$partition"_a super.img.raw || $LPUNPACK --partition="$partition" super.img.raw) 2>/dev/null
+        log_debug "Extracting partition '${partition}' from super image..."
+        ($LPUNPACK --partition="$partition"_a super.img.raw 2>/dev/null || $LPUNPACK --partition="$partition" super.img.raw 2>/dev/null) 2>/dev/null
         if [ -f "$partition"_a.img ]; then
             mv "$partition"_a.img "$partition".img
+            log_info "Extracted $partition from super image"
+        elif [ -f "$partition".img ]; then
+            log_info "Extracted $partition from super image"
         else
-            foundpartitions=$(${BIN_7ZZ} l -ba "${FILEPATH}" | rev | gawk '{ print $1 }' | rev | grep $partition.img)
-            ${BIN_7ZZ} e -y "${FILEPATH}" $foundpartitions dummypartition 2>/dev/null >> $TMPDIR/zip.log
+            foundpartitions=$(${BIN_7ZZ} l -ba "${FILEPATH}" | rev | gawk '{ print $1 }' | rev | grep "$partition".img)
+            if [[ -n "${foundpartitions}" ]]; then
+                ${BIN_7ZZ} e -y "${FILEPATH}" $foundpartitions dummypartition 2>/dev/null >> "$TMPDIR"/zip.log
+            fi
         fi
     done
     rm -rf super.img.raw
+}
+
+# ─────────────────────────────────────────────────────────────────────
+# MTK (MediaTek) Device Support Functions
+# ─────────────────────────────────────────────────────────────────────
+
+# Detect if firmware is for MTK platform
+is_mtk_platform() {
+    local prop_files=()
+    for f in vendor/build*.prop system/build*.prop system/system/build*.prop; do
+        [[ -f "$f" ]] && prop_files+=("$f")
+    done
+    for pf in "${prop_files[@]}"; do
+        if grep -q "ro.hardware.chipname=mt\|ro.board.platform=mt\|ro.mediatek" "$pf" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Extract MTK preloader image (if present)
+extract_mtk_preloader() {
+    local preloader_img="$1"
+    if [[ -f "${preloader_img}" ]]; then
+        log_info "Extracting MTK preloader..."
+        mkdir -p preloader
+        cp "${preloader_img}" preloader/
+        # Parse preloader header for device info
+        local preloader_name
+        preloader_name=$(strings "${preloader_img}" 2>/dev/null | grep -iE "^NAME=|PRELOADER" | head -1)
+        [[ -n "${preloader_name}" ]] && echo "${preloader_name}" > preloader/preloader_info.txt
+    fi
+}
+
+# Extract MTK logo.bin partition (boot logo images)
+extract_mtk_logo() {
+    local logo_img="$1"
+    if [[ -f "${logo_img}" ]]; then
+        log_info "Extracting MTK logo images..."
+        mkdir -p logo
+        # MTK logo.bin contains multiple BMP/PNG images with a simple header
+        local magic
+        magic=$(od -A n -tx1 -N 8 "${logo_img}" 2>/dev/null | tr -d ' ')
+        if [[ "${magic}" == "88168858"* ]]; then
+            log_debug "MTK logo.bin header detected"
+            cp "${logo_img}" logo/logo.bin
+        else
+            cp "${logo_img}" logo/logo.bin
+        fi
+    fi
+}
+
+# Extract MTK scatter file info (if present in firmware)
+extract_mtk_scatter() {
+    local scatter_file
+    scatter_file=$(find "${TMPDIR}" -maxdepth 2 \( -iname "*scatter*" -o -iname "MT*.txt" \) 2>/dev/null | head -1)
+    if [[ -n "${scatter_file}" && -f "${scatter_file}" ]]; then
+        log_info "MTK scatter file detected: $(basename "${scatter_file}")"
+        cp "${scatter_file}" "${OUTDIR}/scatter.txt"
+    fi
+}
+
+# Handle MTK-specific images that may be in firmware
+process_mtk_images() {
+    log_group_start "MTK Platform Processing"
+
+    # Extract preloader if present
+    for pl in preloader*.img preloader*.bin; do
+        [[ -f "${pl}" ]] && extract_mtk_preloader "${pl}" && break
+    done
+
+    # Extract logo if present (MTK devices store boot logos as separate partition)
+    if [[ -f logo.img ]] || [[ -f "system/system/etc/logo.img" ]]; then
+        local logo_src="logo.img"
+        [[ ! -f "${logo_src}" && -f "system/system/etc/logo.img" ]] && logo_src="system/system/etc/logo.img"
+        extract_mtk_logo "${logo_src}"
+    fi
+
+    # Extract spmfw (MediaTek SPM firmware) if present
+    if [[ -f spmfw.img ]]; then
+        log_info "MTK SPM firmware image found"
+        mkdir -p spmfw
+        cp spmfw.img spmfw/
+    fi
+
+    # Extract sspm (MediaTek SSPM firmware) if present
+    if [[ -f sspm.img ]]; then
+        log_info "MTK SSPM firmware image found"
+        mkdir -p sspm
+        cp sspm.img sspm/
+    fi
+
+    # Extract mcupm (MediaTek MCU PM firmware) if present
+    if [[ -f mcupm.img ]]; then
+        log_info "MTK MCUPM firmware image found"
+        mkdir -p mcupm
+        cp mcupm.img mcupm/
+    fi
+
+    # Extract lk (little kernel bootloader) if present
+    if [[ -f lk.img ]]; then
+        log_info "MTK LK (Little Kernel) image found"
+        mkdir -p lk
+        cp lk.img lk/
+        strings lk.img 2>/dev/null | grep -i "LK_VER\|project\|platform" | head -5 > lk/lk_info.txt 2>/dev/null
+        [[ ! -s lk/lk_info.txt ]] && rm -f lk/lk_info.txt
+    fi
+
+    # Extract tee (trusted execution environment) if present
+    for tee_img in tee.img tee1.img tee2.img; do
+        if [[ -f "${tee_img}" ]]; then
+            log_info "MTK TEE image found: ${tee_img}"
+            mkdir -p tee
+            cp "${tee_img}" tee/
+        fi
+    done
+
+    # Extract scatter file if present in TMPDIR
+    extract_mtk_scatter
+
+    log_group_end
 }
 
 log_step "Extracting firmware on: ${OUTDIR}"
@@ -768,9 +898,9 @@ for partition in ${PARTITIONS}; do
 		offset=$(LANG=C grep -aobP -m1 '\x53\xEF' "${OUTDIR}"/"${partition}".img | head -1 | gawk '{print $1 - 1080}')
 		if echo "${MAGIC}" | grep -q "MOTO"; then
 			[[ "$offset" == 128055 ]] && offset=131072
-			printf "MOTO header detected on %s in %s\n" "${partition}" "${offset}"
+			log_info "MOTO header detected on ${partition} at offset ${offset}"
 		elif echo "${MAGIC}" | grep -q "ASUS"; then
-			printf "ASUS header detected on %s in %s\n" "${partition}" "${offset}"
+			log_info "ASUS header detected on ${partition} at offset ${offset}"
 		else
 			offset=0
 		fi
@@ -797,6 +927,12 @@ get_bootimg_info() {
 
             # Rename AOSP output files to match expected names
             [[ -f "${tempdir}/ramdisk" ]] && mv "${tempdir}/ramdisk" "${tempdir}/ramdisk.cpio"
+            # vendor_boot: rename vendor_ramdisk to ramdisk.cpio if no ramdisk.cpio exists
+            [[ ! -f "${tempdir}/ramdisk.cpio" && -f "${tempdir}/vendor_ramdisk" ]] && mv "${tempdir}/vendor_ramdisk" "${tempdir}/ramdisk.cpio"
+            # vendor_boot v4: keep numbered vendor ramdisks for multi-ramdisk extraction
+            for vr in "${tempdir}"/vendor_ramdisk[0-9]*; do
+                [[ -f "${vr}" ]] && log_debug "Found multi-ramdisk: $(basename "${vr}")"
+            done
 
             # Generate mkbootimg args for repacking reference
             python3 "${UNPACK_BOOTIMG}" --boot_img "${bootimg}" --out "${tempdir}" --format mkbootimg > "${tempdir}/mkbootimg_args.txt" 2>/dev/null || true
@@ -970,45 +1106,78 @@ for image in boot vendor_boot vendor_kernel_boot init_boot recovery; do
         fi
 
         ## Extract ramdisk content
-        # Look for ramdisk file (AOSP names it 'ramdisk', we rename to ramdisk.cpio)
-        ramdiskfile=""
+        # Look for ramdisk files (AOSP names it 'ramdisk', we rename to ramdisk.cpio)
+        # vendor_boot may have multiple ramdisks (vendor_ramdisk00, vendor_ramdisk01, etc.)
+        ramdisk_files=()
         for rname in ramdisk.cpio ramdisk vendor_ramdisk; do
             if [[ -f "${image}/${rname}" ]]; then
-                ramdiskfile="${image}/${rname}"
+                ramdisk_files+=("${image}/${rname}")
                 break
             fi
         done
+        # Also collect numbered vendor ramdisks (vendor_boot with multiple ramdisks)
+        for vr in "${image}"/vendor_ramdisk[0-9]*; do
+            [[ -f "${vr}" ]] && ramdisk_files+=("${vr}")
+        done
 
-        if [[ -n "${ramdiskfile}" ]]; then
-            mkdir -p "${image}/ramdisk"
+        for ramdiskfile in "${ramdisk_files[@]}"; do
+            local_ramdisk_name=$(basename "${ramdiskfile}")
+            # Determine extraction target directory
+            if [[ "${#ramdisk_files[@]}" -gt 1 && "${local_ramdisk_name}" == vendor_ramdisk* ]]; then
+                ramdisk_outdir="${image}/ramdisk_${local_ramdisk_name}"
+            else
+                ramdisk_outdir="${image}/ramdisk"
+            fi
+            rm -rf "${ramdisk_outdir}" 2>/dev/null
+            mkdir -p "${ramdisk_outdir}"
+
             # Detect compression format and decompress accordingly
             ramdisk_magic=$(od -A n -tx1 -N 4 "${ramdiskfile}" 2>/dev/null | tr -d ' ')
+            log_debug "Ramdisk '${local_ramdisk_name}' magic: ${ramdisk_magic:-<empty>}"
             case "${ramdisk_magic}" in
-                04224d18)  # LZ4
+                04224d18|02214c18)  # LZ4 (standard frame or legacy frame)
                     unlz4 "${ramdiskfile}" "${image}/ramdisk_decompressed" 2>/dev/null && \
-                        ${BIN_7ZZ} -snld x "${image}/ramdisk_decompressed" -o"${image}/ramdisk" > /dev/null 2>&1
+                        ${BIN_7ZZ} -snld x "${image}/ramdisk_decompressed" -o"${ramdisk_outdir}" > /dev/null 2>&1
                     rm -f "${image}/ramdisk_decompressed"
                     ;;
                 1f8b*)     # GZIP
-                    ${BIN_7ZZ} -snld x "${ramdiskfile}" -o"${image}/ramdisk" > /dev/null 2>&1
+                    ${BIN_7ZZ} -snld x "${ramdiskfile}" -o"${ramdisk_outdir}" > /dev/null 2>&1
                     ;;
                 28b52ffd)  # ZSTD
                     zstd -d "${ramdiskfile}" -o "${image}/ramdisk_decompressed" 2>/dev/null && \
-                        ${BIN_7ZZ} -snld x "${image}/ramdisk_decompressed" -o"${image}/ramdisk" > /dev/null 2>&1
+                        ${BIN_7ZZ} -snld x "${image}/ramdisk_decompressed" -o"${ramdisk_outdir}" > /dev/null 2>&1
                     rm -f "${image}/ramdisk_decompressed"
                     ;;
-                30373037)  # CPIO (uncompressed, magic "0707")
-                    ${BIN_7ZZ} -snld x "${ramdiskfile}" -o"${image}/ramdisk" > /dev/null 2>&1
+                fd377a58|5d000080)  # XZ / LZMA
+                    ${BIN_7ZZ} -snld x "${ramdiskfile}" -o"${ramdisk_outdir}" > /dev/null 2>&1
+                    ;;
+                30373037|30373031)  # CPIO (uncompressed, magic "0707" or "0701")
+                    ${BIN_7ZZ} -snld x "${ramdiskfile}" -o"${ramdisk_outdir}" > /dev/null 2>&1
+                    ;;
+                "")        # Empty magic: file may be corrupt or zero-padded
+                    log_debug "Empty magic bytes for ramdisk '${local_ramdisk_name}' in ${image}, trying generic extraction..."
+                    if ! ${BIN_7ZZ} -snld x "${ramdiskfile}" -o"${ramdisk_outdir}" > /dev/null 2>&1; then
+                        unlz4 "${ramdiskfile}" "${image}/ramdisk_decompressed" 2>/dev/null && \
+                            ${BIN_7ZZ} -snld x "${image}/ramdisk_decompressed" -o"${ramdisk_outdir}" > /dev/null 2>&1
+                        rm -f "${image}/ramdisk_decompressed"
+                    fi
                     ;;
                 *)         # Try 7z as generic fallback
-                    ${BIN_7ZZ} -snld x "${ramdiskfile}" -o"${image}/ramdisk" > /dev/null 2>&1 || \
-                        log_warn "Failed to extract ramdisk for ${image} (unknown format: ${ramdisk_magic})"
+                    if ! ${BIN_7ZZ} -snld x "${ramdiskfile}" -o"${ramdisk_outdir}" > /dev/null 2>&1; then
+                        # Second fallback: try unlz4 (some LZ4 variants have non-standard magic)
+                        if unlz4 "${ramdiskfile}" "${image}/ramdisk_decompressed" 2>/dev/null; then
+                            ${BIN_7ZZ} -snld x "${image}/ramdisk_decompressed" -o"${ramdisk_outdir}" > /dev/null 2>&1
+                        else
+                            log_warn "Failed to extract ramdisk for ${image} (unknown format: ${ramdisk_magic})"
+                        fi
+                        rm -f "${image}/ramdisk_decompressed"
+                    fi
                     ;;
             esac
-        fi
+        done
 
         ## Clean-up raw ramdisk files (keep extracted ramdisk/ directory)
-        rm -f "${image}/ramdisk.cpio" "${image}/ramdisk_decompressed" 2>/dev/null
+        rm -f "${image}/ramdisk.cpio" "${image}/ramdisk_decompressed" "${image}"/vendor_ramdisk* 2>/dev/null
 
         # Extract DTBs via 'extract-dtb'
         log_info "Extracting device-tree(s) from '${image}'..."
@@ -1087,37 +1256,47 @@ fi
 for p in $PARTITIONS; do
 	if ! echo "${p}" | grep -q "boot\|recovery\|dtbo\|vendor_boot\|vendor_kernel_boot\|init_boot\|tz"; then
 		if [[ -e "$p.img" ]]; then
-			mkdir "$p" 2> /dev/null || rm -rf "${p:?}"/*
+			rm -rf "${p:?}" 2>/dev/null; mkdir -p "$p"
 			log_info "Extracting $p partition..."
-			${BIN_7ZZ} x -snld "$p".img -y -o"$p"/ > /dev/null 2>&1
-			if [ $? -eq 0 ]; then
-				rm "$p".img > /dev/null 2>&1
+			if ${BIN_7ZZ} x -snld "$p".img -y -o"$p"/ > /dev/null 2>&1; then
+				rm -f "$p".img > /dev/null 2>&1
 			else
-				# Handling EROFS Images, which can't be handled by 7z.
-				log_warn "Extraction failed with 7z"
-				if [ -f $p.img ] && [ $p != "modem" ]; then
+				# EROFS/F2FS images can't be handled by 7z - try fsck.erofs silently
+				log_debug "7z extraction failed for $p, trying alternative extractors..."
+				if [[ -f "$p.img" ]] && [[ "$p" != "modem" ]]; then
 					log_info "Extracting $p with fsck.erofs..."
 					rm -rf "${p}"/*
-					"${FSCK_EROFS}" --extract="$p" "$p".img
-					if [ $? -eq 0 ]; then
-						rm -fv "$p".img > /dev/null 2>&1
+					if "${FSCK_EROFS}" --extract="$p" "$p".img > /dev/null 2>&1; then
+						rm -f "$p".img > /dev/null 2>&1
 					else
 						log_info "Extracting $p with mount loop..."
-						sudo mount -o loop -t auto "$p".img "$p"
-						mkdir "${p}_"
-						sudo cp -rf "${p}/"* "${p}_"
-						sudo umount "${p}"
-						sudo cp -rf "${p}_/"* "${p}"
-						sudo rm -rf "${p}_"
-						sudo chown -R "$(whoami)" "${p}"/*
-						chmod -R u+rwX "${p}"/*
-						if [ $? -eq 0 ]; then
-							rm -fv "$p".img > /dev/null 2>&1
+						if sudo mount -o loop,ro -t auto "$p".img "$p" 2>/dev/null; then
+							mkdir -p "${p}_"
+							sudo cp -rf "${p}/"* "${p}_" 2>/dev/null
+							sudo umount "${p}" 2>/dev/null
+							sudo cp -rf "${p}_/"* "${p}" 2>/dev/null
+							sudo rm -rf "${p}_"
+							sudo chown -R "$(whoami)" "${p}"/* 2>/dev/null
+							chmod -R u+rwX "${p}"/* 2>/dev/null
+							rm -f "$p".img > /dev/null 2>&1
 						else
 							log_warn "Could not extract $p partition. It might use an unsupported filesystem."
-							echo "For EROFS: make sure you're using Linux 5.4+ kernel."
-							echo "For F2FS: make sure you're using Linux 5.15+ kernel."
 						fi
+					fi
+				elif [[ -f "$p.img" ]] && [[ "$p" == "modem" ]]; then
+					# Modem partitions may be raw binary, try mounting directly
+					log_info "Extracting $p with mount loop..."
+					if sudo mount -o loop,ro -t auto "$p".img "$p" 2>/dev/null; then
+						mkdir -p "${p}_"
+						sudo cp -rf "${p}/"* "${p}_" 2>/dev/null
+						sudo umount "${p}" 2>/dev/null
+						sudo cp -rf "${p}_/"* "${p}" 2>/dev/null
+						sudo rm -rf "${p}_"
+						sudo chown -R "$(whoami)" "${p}"/* 2>/dev/null
+						chmod -R u+rwX "${p}"/* 2>/dev/null
+						rm -f "$p".img > /dev/null 2>&1
+					else
+						log_debug "Could not mount $p partition, keeping raw image."
 					fi
 				fi
 			fi
@@ -1131,6 +1310,12 @@ for q in *.img; do
 		rm -f "${q}" 2>/dev/null
 	fi
 done
+
+# Process MTK-specific images if detected
+if is_mtk_platform 2>/dev/null; then
+	log_info "MTK (MediaTek) platform detected"
+	process_mtk_images
+fi
 
 # Oppo/Realme Devices Have Some Images In A Euclid Folder In Their Vendor and/or System, Extract Those For Props
 for dir in "vendor/euclid" "system/system/euclid"; do
@@ -1497,6 +1682,11 @@ rm -rf "${TMPDIR}" 2>/dev/null
 commit_and_push(){
 	log_group_start "Git LFS Setup"
 
+	# Configure credential helper for LFS (prevents password prompt in CI)
+	if [[ "${CI}" == "true" && -n "${GITHUB_TOKEN}" ]]; then
+		git config --local credential.helper "!f() { echo \"username=x-access-token\"; echo \"password=${GITHUB_TOKEN}\"; }; f"
+	fi
+
 	# Initialize Git LFS
 	git lfs install
 
@@ -1709,7 +1899,7 @@ if [[ -n "${GITHUB_TOKEN}" ]] && [[ "${PUSH_TO_GITLAB}" != "true" ]]; then
 	log_step "Initializing Git repository..."
 
 	# Initialize git repository (needed for git lfs)
-	git init
+	git init -b main
 	git config --global http.postBuffer 524288000
 
 	git checkout -b "${branch}" || { git checkout -b "${incremental}" && export branch="${incremental}"; }
@@ -1779,7 +1969,7 @@ elif [[ -n "${GITLAB_TOKEN}" ]]; then
 	ls -lAog
 	log_step "Initializing Git repository..."
 
-	git init
+	git init -b main
 	git config --global http.postBuffer 524288000
 	git checkout -b "${branch}" || { git checkout -b "${incremental}" && export branch="${incremental}"; }
 	find . \( -name "*sensetime*" -o -name "*.lic" \) | cut -d'/' -f'2-' >| .gitignore
@@ -1847,7 +2037,7 @@ elif [[ -n "${GITLAB_TOKEN}" ]]; then
 	PROJECT_ID=$(get_gitlab_project_id "${codename}" "${SUBGRP_ID}")
 
 	# Commit and Push
-	git remote add origin git@${GITLAB_INSTANCE}:${GIT_ORG}/${repo}.git
+	git remote add origin https://oauth2:${GITLAB_TOKEN}@${GITLAB_INSTANCE}/${GIT_ORG}/${repo}.git
 
 	# Ensure that the target repo is public
     curl -s \
