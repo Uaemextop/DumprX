@@ -38,8 +38,7 @@ on:
 jobs:
   dump:
     name: Extract Firmware
-    runs-on: ubuntu-latest
-    timeout-minutes: 720
+    runs-on: mp4
     permissions:
       contents: write
 
