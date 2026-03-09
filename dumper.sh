@@ -1949,14 +1949,43 @@ if [[ -n "${GITHUB_TOKEN}" ]] && [[ "${PUSH_TO_GITLAB}" != "true" ]]; then
 	find . \( -name "*sensetime*" -o -name "*.lic" \) | cut -d'/' -f'2-' >| .gitignore
 	[[ ! -s .gitignore ]] && rm .gitignore
 
-	# Create GitHub repository
+	# Create GitHub repository (find a unique name if it already exists)
 	log_step "Creating GitHub repository: ${GIT_ORG}/${repo}"
 	GIT_USER="$(git config --get user.name)"
+	base_repo="${repo}"
+	suffix=0
+	while true; do
+		# Check if repo already exists
+		http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+			-H "Authorization: token ${GITHUB_TOKEN}" \
+			"https://api.github.com/repos/${GIT_ORG}/${repo}")
+		if [[ "${http_code}" != "200" ]]; then
+			break
+		fi
+		suffix=$((suffix + 1))
+		repo="${base_repo}_${suffix}"
+		log_info "Repository ${GIT_ORG}/${base_repo}$([ ${suffix} -gt 1 ] && echo "_$((suffix - 1))") already exists, trying: ${GIT_ORG}/${repo}"
+	done
+
+	# Create the repository
 	if [[ "${GIT_ORG}" == "${GIT_USER}" ]]; then
-		curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -d '{"name": "'"${repo}"'", "description": "'"${description}"'"}' "https://api.github.com/user/repos" >/dev/null 2>&1
+		http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+			-H "Authorization: token ${GITHUB_TOKEN}" \
+			-d '{"name": "'"${repo}"'", "description": "'"${description}"'"}' \
+			"https://api.github.com/user/repos")
 	else
-		curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -d '{ "name": "'"${repo}"'", "description": "'"${description}"'"}' "https://api.github.com/orgs/${GIT_ORG}/repos" >/dev/null 2>&1
+		http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+			-H "Authorization: token ${GITHUB_TOKEN}" \
+			-d '{"name": "'"${repo}"'", "description": "'"${description}"'"}' \
+			"https://api.github.com/orgs/${GIT_ORG}/repos")
 	fi
+
+	if [[ "${http_code}" != "201" ]]; then
+		log_error "Failed to create GitHub repository: ${GIT_ORG}/${repo} (HTTP ${http_code})"
+		exit 1
+	fi
+	log_success "Repository created: ${GIT_ORG}/${repo}"
+
 	curl -s -X PUT -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github.mercy-preview+json" -d '{ "names": ["'"${platform}"'","'"${manufacturer}"'","'"${top_codename}"'","firmware","dump"]}' "https://api.github.com/repos/${GIT_ORG}/${repo}/topics" >/dev/null 2>&1
 	log_group_end
 
