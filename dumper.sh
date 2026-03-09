@@ -127,6 +127,14 @@ for tool_slug in "${EXTERNAL_TOOLS[@]}"; do
 	fi
 done
 
+# Fix grep patterns in proprietary-files.sh to use fixed-string matching.
+# File paths may contain regex-special characters (e.g. libc++.so) that cause
+# "grep: Invalid regular expression" when used as patterns.
+if [[ -f "${UTILSDIR}"/android_tools/tools/proprietary-files.sh ]]; then
+	sed -i 's/grep "$line"/grep -F "$line"/g' "${UTILSDIR}"/android_tools/tools/proprietary-files.sh
+	sed -i 's/grep -q "$line"/grep -Fq "$line"/g' "${UTILSDIR}"/android_tools/tools/proprietary-files.sh
+fi
+
 # Retrive 'extract-ikconfig' from torvalds/linux
 if ! [[ -f "${UTILSDIR}"/extract-ikconfig ]]; then
     log_info "Downloading extract-ikconfig..."
@@ -1583,19 +1591,6 @@ rm -rf $(find $twrpdtout -type d -name ".git")
 chown "$(whoami)" ./* -R
 chmod -R u+rwX ./*		#ensure final permissions
 
-# Replace symbolic links with text files (prevents EACCES errors with actions/upload-artifact@v4)
-# Extracted Android partitions contain symlinks to runtime paths (e.g. /sys/kernel/debug)
-# that cannot be followed outside the device and cause upload failures in CI.
-symlink_count=$(find "${OUTDIR}" -type l 2>/dev/null | wc -l)
-if [[ "${symlink_count}" -gt 0 ]]; then
-	log_info "Replacing ${symlink_count} symbolic links with text placeholders..."
-	find "${OUTDIR}" -type l | while IFS= read -r link; do
-		target=$(readlink "$link")
-		rm "$link"
-		echo "symbolic link to ${target}" > "$link"
-	done
-fi
-
 find "$OUTDIR" -type f -printf '%P\n' | sort | grep -v ".git/" > "$OUTDIR"/all_files.txt
 
 # Generate LineageOS Trees
@@ -1691,6 +1686,21 @@ rm -rf "$OUTDIR"/all_files.sha1.tmp
 # Regenerate all_files.txt
 log_info "Generating all_files.txt..."
 find "$OUTDIR" -type f -printf '%P\n' | sort | grep -v ".git/" > "$OUTDIR"/all_files.txt
+
+# Replace symbolic links with text files (prevents EACCES errors with actions/upload-artifact@v4)
+# Extracted Android partitions contain symlinks to runtime paths (e.g. /sys/kernel/debug)
+# that cannot be followed outside the device and cause upload failures in CI.
+# This must happen AFTER all file generation (proprietary-files, sha1sums, all_files)
+# so that sha1 hashes reflect actual file content, not placeholder text.
+symlink_count=$(find "${OUTDIR}" -type l 2>/dev/null | wc -l)
+if [[ "${symlink_count}" -gt 0 ]]; then
+	log_info "Replacing ${symlink_count} symbolic links with text placeholders..."
+	find "${OUTDIR}" -type l | while IFS= read -r link; do
+		target=$(readlink "$link")
+		rm "$link"
+		echo "symbolic link to ${target}" > "$link"
+	done
+fi
 
 rm -rf "${TMPDIR}" 2>/dev/null
 
