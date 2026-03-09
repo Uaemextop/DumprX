@@ -40,6 +40,10 @@ def create_out_dir(dir_path):
 
 def extract_image(offset, size, bootimage, extracted_image_name):
     """extracts an image from the bootimage"""
+    # If output path is an existing directory, write inside it instead
+    if os.path.isdir(extracted_image_name):
+        extracted_image_name = os.path.join(
+            extracted_image_name, os.path.basename(extracted_image_name) + '.img')
     bootimage.seek(offset)
     with open(extracted_image_name, 'wb') as file_out:
         file_out.write(bootimage.read(size))

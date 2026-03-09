@@ -69,6 +69,12 @@ jobs:
           fi
           echo "::endgroup::"
 
+          echo "::group::Python dependencies for device tree generators"
+          pip3 install --break-system-packages GitPython Jinja2 pyelftools requests 2>/dev/null || \
+            pip3 install GitPython Jinja2 pyelftools requests 2>/dev/null || \
+            python3 -m pip install --break-system-packages GitPython Jinja2 pyelftools requests 2>/dev/null || true
+          echo "::endgroup::"
+
       - name: '🔑 Configure credentials'
         run: |
           git config --global user.name "github-actions[bot]"

@@ -92,6 +92,20 @@ if ! command -v uv > /dev/null ; then
     bash -c "$(curl -sL https://astral.sh/uv/install.sh)" || abort "Setup Failed!"
 fi
 
+# Install Python dependencies for local twrpdtgen/aospdtgen/sebaubuntu_libs
+echo -e ${BLUE}">> Installing Python dependencies for device tree generators..."${NORMAL}
+if command -v pip3 > /dev/null 2>&1; then
+    pip3 install --break-system-packages GitPython Jinja2 pyelftools requests 2>/dev/null || \
+    pip3 install GitPython Jinja2 pyelftools requests 2>/dev/null || true
+elif command -v pip > /dev/null 2>&1; then
+    pip install --break-system-packages GitPython Jinja2 pyelftools requests 2>/dev/null || \
+    pip install GitPython Jinja2 pyelftools requests 2>/dev/null || true
+else
+    python3 -m pip install --break-system-packages GitPython Jinja2 pyelftools requests 2>/dev/null || \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3 - --break-system-packages 2>/dev/null && \
+    python3 -m pip install --break-system-packages GitPython Jinja2 pyelftools requests 2>/dev/null || true
+fi
+
 # Initialize git-lfs
 echo -e ${BLUE}">> Setting up Git LFS..."${NORMAL}
 git lfs install || true
