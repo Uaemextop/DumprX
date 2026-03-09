@@ -1898,6 +1898,14 @@ if [[ -z "${GIT_ORG}" ]]; then
 	fi
 fi
 
+# Git User: env var takes precedence over file, then auto-detect from API
+if [[ -z "${GIT_USER}" ]] && [[ -s "${PROJECT_DIR}"/.github_user ]]; then
+	GIT_USER=$(< "${PROJECT_DIR}"/.github_user)
+fi
+if [[ -z "${GIT_USER}" ]] && [[ -n "${GITHUB_TOKEN}" ]]; then
+	GIT_USER=$(curl -sf -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/user | jq -r '.login // empty' 2>/dev/null)
+fi
+
 # Telegram: env var takes precedence over file
 if [[ -z "${TG_TOKEN}" ]] && [[ -s "${PROJECT_DIR}"/.tg_token ]]; then
 	TG_TOKEN=$(< "${PROJECT_DIR}"/.tg_token)
@@ -1921,18 +1929,24 @@ fi
 if [[ -n "${GITHUB_TOKEN}" ]] && [[ "${PUSH_TO_GITLAB}" != "true" ]]; then
 	log_group_start "GitHub Repository Setup"
 
-	# Configure git identity for GitHub Actions
-	if [[ "${CI}" == "true" ]]; then
+	# Configure git identity
+	if [[ -n "${GIT_USER}" ]]; then
+		git config --global user.name "${GIT_USER}"
+	elif [[ "${CI}" == "true" ]]; then
 		git config --global user.name "github-actions[bot]"
+	else
+		[[ -z "$(git config --get user.name)" ]] && git config user.name "Sushrut1101"
+	fi
+	if [[ -n "${GIT_EMAIL}" ]]; then
+		git config --global user.email "${GIT_EMAIL}"
+	elif [[ "${CI}" == "true" ]]; then
 		git config --global user.email "github-actions[bot]@users.noreply.github.com"
 	else
 		[[ -z "$(git config --get user.email)" ]] && git config user.email "guptasushrut@gmail.com"
-		[[ -z "$(git config --get user.name)" ]] && git config user.name "Sushrut1101"
 	fi
 
 	if [[ -z "${GIT_ORG}" ]]; then
-		GIT_USER="$(git config --get user.name)"
-		GIT_ORG="${GIT_USER}"
+		GIT_ORG="${GIT_USER:-$(git config --get user.name)}"
 	fi
 
 	# Check if already dumped or not
@@ -1965,7 +1979,11 @@ if [[ -n "${GITHUB_TOKEN}" ]] && [[ "${PUSH_TO_GITLAB}" != "true" ]]; then
 
 	# Create GitHub repository (find a unique name if it already exists)
 	log_step "Creating GitHub repository: ${GIT_ORG}/${repo}"
-	GIT_USER="$(git config --get user.name)"
+	# Use GIT_USER already resolved from env/API, fall back to git config
+	if [[ -z "${GIT_USER}" ]]; then
+		GIT_USER="$(git config --get user.name)"
+	fi
+	log_info "Authenticated GitHub user: ${GIT_USER}"
 	base_repo="${repo}"
 	suffix=0
 	while true; do
@@ -2035,8 +2053,7 @@ elif [[ -n "${GITLAB_TOKEN}" ]]; then
 		if [[ -s "${PROJECT_DIR}"/.gitlab_group ]]; then
 			GIT_ORG=$(< "${PROJECT_DIR}"/.gitlab_group)
 		else
-			GIT_USER="$(git config --get user.name)"
-			GIT_ORG="${GIT_USER}"
+			GIT_ORG="${GIT_USER:-$(git config --get user.name)}"
 		fi
 	fi
 
