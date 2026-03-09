@@ -1,0 +1,6 @@
+[submodule "utils/android_tools"]
+	path = utils/android_tools
+	url = https://github.com/ShivamKumarJha/android_tools.git
+[submodule "utils/pacextractor"]
+	path = utils/pacextractor
+	url = https://github.com/HemanthJabalpuri/pacextractor.git
