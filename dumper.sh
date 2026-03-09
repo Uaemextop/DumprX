@@ -1962,7 +1962,7 @@ if [[ -n "${GITHUB_TOKEN}" ]] && [[ "${PUSH_TO_GITLAB}" != "true" ]]; then
 
 	# Commit and Push
 	log_step "Pushing to https://github.com/${GIT_ORG}/${repo}.git (branch: ${branch})"
-	git remote add origin https://${GITHUB_TOKEN}@github.com/${GIT_ORG}/${repo}.git
+	git remote add origin https://x-access-token:${GITHUB_TOKEN}@github.com/${GIT_ORG}/${repo}.git
 	commit_and_push
 
 	# Telegram channel post
