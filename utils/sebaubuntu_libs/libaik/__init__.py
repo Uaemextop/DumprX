@@ -8,10 +8,10 @@
 from pathlib import Path
 from platform import system
 from sebaubuntu_libs.liblogging import LOGI
-from shutil import which, copytree
-from subprocess import check_output, STDOUT, CalledProcessError
+from shutil import which, copytree, rmtree
+from subprocess import check_output, STDOUT, CalledProcessError, run, DEVNULL
 from tempfile import TemporaryDirectory
-from typing import Optional
+from typing import List, Optional
 
 AIK_REPO = "https://github.com/SebaUbuntu/AIK-Linux-mirror"
 # Local AIK-Linux path bundled with DumprX (avoids cloning at runtime)
@@ -21,6 +21,36 @@ ALLOWED_OS = [
 	"Linux",
 	"Darwin",
 ]
+
+# CPIO newc trailer marker
+_CPIO_TRAILER = b'TRAILER!!!'
+# Files that identify a recovery ramdisk
+_RECOVERY_PROP_NAMES = (b'prop.default', b'default.prop', b'build.prop')
+
+
+def _split_cpio_archives(data: bytes) -> List[bytes]:
+	"""Split concatenated CPIO archives at TRAILER!!! boundaries.
+
+	vendor_boot v4 combined ramdisks contain multiple CPIO archives
+	concatenated. Each ends with a TRAILER!!! entry + null padding.
+	"""
+	archives = []
+	offset = 0
+	while offset < len(data):
+		while offset < len(data) and data[offset:offset + 1] == b'\x00':
+			offset += 1
+		if offset >= len(data):
+			break
+		trailer_pos = data.find(_CPIO_TRAILER, offset)
+		if trailer_pos == -1:
+			if len(data) - offset > 110:
+				archives.append(data[offset:])
+			break
+		end = trailer_pos + len(_CPIO_TRAILER)
+		end = (end + 3) & ~3
+		archives.append(data[offset:end])
+		offset = end
+	return archives
 
 class AIKImageInfo:
 	def __init__(
@@ -130,7 +160,6 @@ class AIKManager:
 
 		if returncode != 0:
 			if self.UNPACKING_FAILED_STRING in output and ignore_ramdisk_errors:
-				# Delete ramdisk folder to avoid issues
 				try:
 					self.ramdisk_path.rmdir()
 				except Exception:
@@ -138,7 +167,93 @@ class AIKManager:
 			else:
 				raise RuntimeError(f"AIK extraction failed, return code {returncode}")
 
+		# vendor_boot v4: combined ramdisk has concatenated CPIOs.
+		# AIK only extracts the first one (base ramdisk with modules).
+		# We need the recovery CPIO (the one with prop.default) instead.
+		header_version = self._read_recovery_file(image_prefix, "header_version", default="0")
+		image_type = self._read_recovery_file(image_prefix, "imgtype")
+		if image_type and "VNDR" in image_type and int(header_version or "0") >= 4:
+			self._select_recovery_ramdisk(image_prefix)
+
 		return self._get_current_extracted_info(image_prefix)
+
+	def _select_recovery_ramdisk(self, image_prefix: str):
+		"""For vendor_boot v4, extract only the recovery CPIO from the combined ramdisk.
+
+		The combined vendor ramdisk contains multiple concatenated CPIO archives:
+		  - base ramdisk (kernel modules, fstab) — extracted by AIK
+		  - recovery ramdisk (prop.default, recovery.fstab, init.rc) — skipped by AIK
+
+		The recovery content may be split across multiple CPIOs (one with props,
+		another with services/fstab). This method identifies all recovery-related
+		archives and extracts them into a single ramdisk.
+		"""
+		# Find compressed ramdisk file from AIK's split_img
+		comp_file = None
+		for f in self.images_path.iterdir():
+			if image_prefix in f.name and "vendor_ramdisk" in f.name and f.stat().st_size > 0:
+				comp_file = f
+				break
+		if not comp_file:
+			return
+
+		comp_type = self._read_recovery_file(image_prefix, "vendor_ramdiskcomp") or ""
+
+		# Decompress the full combined ramdisk
+		decompressed = self.path / "_full_vendor_ramdisk"
+		try:
+			if "lz4" in comp_type:
+				run(["lz4", "-dc", "-l", str(comp_file)],
+				    stdout=open(decompressed, "wb"), stderr=DEVNULL, check=True)
+			elif "gzip" in comp_type or "gz" in comp_type:
+				run(["gzip", "-dc", str(comp_file)],
+				    stdout=open(decompressed, "wb"), stderr=DEVNULL, check=True)
+			elif "zstd" in comp_type:
+				run(["zstd", "-dc", str(comp_file)],
+				    stdout=open(decompressed, "wb"), stderr=DEVNULL, check=True)
+			else:
+				return
+		except Exception:
+			decompressed.unlink(missing_ok=True)
+			return
+
+		if not decompressed.is_file() or decompressed.stat().st_size == 0:
+			return
+
+		data = decompressed.read_bytes()
+		decompressed.unlink(missing_ok=True)
+
+		archives = _split_cpio_archives(data)
+		if len(archives) < 2:
+			return
+
+		LOGI(f"vendor_boot v4: {len(archives)} concatenated CPIO archives found")
+
+		# Identify recovery archives: those with props, recovery.fstab, or recovery RC files
+		# Exclude base archives (those with only kernel modules / first_stage_ramdisk)
+		recovery_archives = []
+		for i, archive in enumerate(archives):
+			has_prop = any(name in archive for name in _RECOVERY_PROP_NAMES)
+			has_recovery_fstab = b'recovery.fstab' in archive
+			has_recovery_rc = b'init.recovery.' in archive or b'.recovery.rc' in archive
+			is_recovery = has_prop or has_recovery_fstab or has_recovery_rc
+			if is_recovery:
+				LOGI(f"  Archive {i}: recovery (prop={has_prop} fstab={has_recovery_fstab} rc={has_recovery_rc})")
+				recovery_archives.append(archive)
+
+		if not recovery_archives:
+			return
+
+		# Clear existing ramdisk and extract only recovery archives
+		if self.ramdisk_path.is_dir():
+			rmtree(self.ramdisk_path, ignore_errors=True)
+		self.ramdisk_path.mkdir(parents=True, exist_ok=True)
+
+		for archive in recovery_archives:
+			run(["cpio", "-idm", "--no-absolute-filenames"],
+			    input=archive, cwd=self.ramdisk_path, capture_output=True)
+
+		LOGI("Recovery ramdisk selected for device tree generation")
 
 	def repackimg(self):
 		return self._execute_script("repack.sh")

@@ -25,6 +25,8 @@ BUILDPROP_LOCATIONS += [Path() / dir / "build.prop"
                         for dir in ["system", "vendor"]]
 BUILDPROP_LOCATIONS += [Path() / dir / "etc" / "build.prop"
                         for dir in ["system", "vendor"]]
+# Android 13+: init_boot stores build.prop here
+BUILDPROP_LOCATIONS += [Path() / "system" / "etc" / "ramdisk" / "build.prop"]
 
 FSTAB_LOCATIONS = [Path() / "etc" / "recovery.fstab"]
 FSTAB_LOCATIONS += [Path() / dir / "etc" / "recovery.fstab"
@@ -73,9 +75,19 @@ class DeviceTree:
 			if not fstab_location.is_file():
 				continue
 
-			LOGD(f"Generating fstab using {fstab} as reference...")
+			LOGD(f"Generating fstab using {fstab_location} as reference...")
 			fstab = Fstab(fstab_location)
 			break
+
+		# Fallback: scan first_stage_ramdisk/ for fstab.* (vendor_boot v4)
+		if fstab is None:
+			fsr = self.image_info.ramdisk / "first_stage_ramdisk"
+			if fsr.is_dir():
+				for f in sorted(fsr.iterdir()):
+					if f.name.startswith("fstab.") and f.is_file():
+						LOGD(f"Generating fstab using {f} as reference...")
+						fstab = Fstab(f)
+						break
 
 		if fstab is None:
 			raise AssertionError("fstab not found")
