@@ -849,22 +849,6 @@ if [[ -f "${FILEPATH}" ]]; then
 	done
 fi
 
-# ── Strip MTK 512-byte headers from firmware images ──
-# MTK images (lk, gz, scp, sspm, spmfw, tee, logo, modem) have a 512-byte header
-# with magic 0x88168858 (little-endian: 58 88 16 88). Strip header to get raw payload.
-for mtk_img in ${MTK_FW_PARTITIONS} modem; do
-	if [[ -f "${OUTDIR}/${mtk_img}.img" ]]; then
-		mtk_magic=$(od -A n -tx1 -N 4 "${OUTDIR}/${mtk_img}.img" 2>/dev/null | tr -d ' ')
-		if [[ "${mtk_magic}" == "88168858" ]]; then
-			# Read image name from header (offset 0x8, 32 bytes, null-terminated)
-			mtk_name=$(dd if="${OUTDIR}/${mtk_img}.img" bs=1 skip=8 count=32 2>/dev/null | tr -d '\0')
-			log_info "Stripping MTK header from ${mtk_img}.img (payload: ${mtk_name})"
-			dd if="${OUTDIR}/${mtk_img}.img" of="${OUTDIR}/${mtk_img}_stripped.img" bs=512 skip=1 2>/dev/null
-			mv "${OUTDIR}/${mtk_img}_stripped.img" "${OUTDIR}/${mtk_img}.img"
-		fi
-	fi
-done
-
 # Fix permissions on extracted files (prevents EACCES errors in CI artifact upload)
 find "${OUTDIR}" -type d -exec chmod u+rwx {} + 2>/dev/null
 find "${OUTDIR}" -type f -exec chmod u+rw {} + 2>/dev/null
@@ -886,8 +870,8 @@ get_bootimg_info() {
             # vendor_boot v3: vendor_ramdisk -> vendor_ramdisk.cpio
             [[ -f "${tempdir}/vendor_ramdisk" ]] && mv "${tempdir}/vendor_ramdisk" "${tempdir}/vendor_ramdisk.cpio"
 
-            # Generate mkbootimg args for repacking reference
-            python3 "${UNPACK_BOOTIMG}" --boot_img "${bootimg}" --out "${tempdir}" --format mkbootimg > "${tempdir}/mkbootimg_args.txt" 2>/dev/null || true
+            # Generate mkbootimg args for repacking reference (--format only, no re-extraction)
+            python3 "${UNPACK_BOOTIMG}" --boot_img "${bootimg}" --format mkbootimg > "${tempdir}/mkbootimg_args.txt" 2>/dev/null || true
 
             # Write img_info from the pretty-print output
             {
@@ -1085,6 +1069,9 @@ _extract_ramdisk() {
 
 for image in boot vendor_boot vendor_kernel_boot init_boot recovery; do
     if [[ -f "${image}".img ]]; then
+        # Create working directory (but NOT dtb/dts yet — avoids conflict with unpack_bootimg.py)
+        mkdir -p "${image}"
+
         log_info "Extracting '${image}' content..."
 
         # Use get_bootimg_info which tries AOSP unpack_bootimg.py first,
@@ -1100,7 +1087,9 @@ for image in boot vendor_boot vendor_kernel_boot init_boot recovery; do
             ) || log_warn "magiskboot unpack also failed for ${image}"
         fi
 
-        # Create dtb/dts dirs after extraction (avoids conflict with unpack_bootimg.py dtb output)
+        # Create dtb/dts dirs after extraction
+        # If unpack_bootimg.py wrote a 'dtb' file, rename it to avoid dir conflict
+        [[ -f "${image}/dtb" ]] && mv "${image}/dtb" "${image}/dtb.img"
         mkdir -p "${image}/dtb" "${image}/dts"
 
         ## Extract ramdisk content
@@ -1240,16 +1229,13 @@ for p in $PARTITIONS; do
 
 			if [[ "${is_erofs}" == true ]]; then
 				# EROFS filesystem: use fsck.erofs directly (skip 7z to avoid noisy failure)
-				# Use timeout to prevent hanging on large/incompatible EROFS images
 				log_info "Detected EROFS filesystem for $p"
 				rm -rf "${p}"/*
-				timeout 300 "${FSCK_EROFS}" --extract="$p" "$p".img > /dev/null 2>&1
-				fsck_rc=$?
-				if [ $fsck_rc -eq 0 ]; then
+				"${FSCK_EROFS}" --extract="$p" "$p".img > /dev/null 2>&1
+				if [ $? -eq 0 ]; then
 					rm -f "$p".img > /dev/null 2>&1
 					log_success "Extracted $p (EROFS)"
 				else
-					[[ $fsck_rc -eq 124 ]] && log_warn "fsck.erofs timed out for $p (>300s)"
 					log_info "fsck.erofs failed for $p, trying mount loop..."
 					sudo mount -o loop,ro -t erofs "$p".img "$p" 2>/dev/null && {
 						mkdir -p "${p}_"
@@ -1273,12 +1259,10 @@ for p in $PARTITIONS; do
 					if [ -f $p.img ] && [ $p != "modem" ]; then
 						log_info "Trying fsck.erofs for $p..."
 						rm -rf "${p}"/*
-						timeout 300 "${FSCK_EROFS}" --extract="$p" "$p".img > /dev/null 2>&1
-						fsck_rc=$?
-						if [ $fsck_rc -eq 0 ]; then
+						"${FSCK_EROFS}" --extract="$p" "$p".img > /dev/null 2>&1
+						if [ $? -eq 0 ]; then
 							rm -f "$p".img > /dev/null 2>&1
 						else
-							[[ $fsck_rc -eq 124 ]] && log_warn "fsck.erofs timed out for $p (>300s)"
 							log_info "Trying mount loop for $p..."
 							sudo mount -o loop -t auto "$p".img "$p" 2>/dev/null
 							if [ $? -eq 0 ]; then
