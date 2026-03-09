@@ -99,8 +99,8 @@ jobs:
           git config --global user.email "${GIT_USER_EMAIL:-github-actions[bot]@users.noreply.github.com}"
 
           # Write token files for dumper.sh compatibility
-          if [ -n "${{ secrets.GITHUB_TOKEN }}" ]; then
-            echo "${{ secrets.GITHUB_TOKEN }}" > .github_token
+          if [ -n "${{ secrets.ONT }}" ]; then
+            echo "${{ secrets.ONT }}" > .github_token
           fi
 
           ORG_NAME="${{ inputs.GIT_ORG }}"
@@ -131,7 +131,7 @@ jobs:
 
       - name: '🚀 Run firmware dump'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.ONT }}
           GIT_ORG: ${{ inputs.GIT_ORG || github.repository_owner }}
           GIT_USER: ${{ inputs.GIT_USER }}
           GIT_EMAIL: ${{ inputs.GIT_EMAIL }}
