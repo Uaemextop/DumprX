@@ -1582,6 +1582,20 @@ rm -rf $(find $twrpdtout -type d -name ".git")
 # copy file names
 chown "$(whoami)" ./* -R
 chmod -R u+rwX ./*		#ensure final permissions
+
+# Replace symbolic links with text files (prevents EACCES errors with actions/upload-artifact@v4)
+# Extracted Android partitions contain symlinks to runtime paths (e.g. /sys/kernel/debug)
+# that cannot be followed outside the device and cause upload failures in CI.
+symlink_count=$(find "${OUTDIR}" -type l 2>/dev/null | wc -l)
+if [[ "${symlink_count}" -gt 0 ]]; then
+	log_info "Replacing ${symlink_count} symbolic links with text placeholders..."
+	find "${OUTDIR}" -type l | while IFS= read -r link; do
+		target=$(readlink "$link")
+		rm "$link"
+		echo "symbolic link to ${target}" > "$link"
+	done
+fi
+
 find "$OUTDIR" -type f -printf '%P\n' | sort | grep -v ".git/" > "$OUTDIR"/all_files.txt
 
 # Generate LineageOS Trees
