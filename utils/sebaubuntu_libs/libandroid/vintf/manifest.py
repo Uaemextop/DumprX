@@ -16,6 +16,7 @@ from sebaubuntu_libs.libandroid.vintf import INDENTATION
 from sebaubuntu_libs.libandroid.vintf.aidl import AidlHal
 from sebaubuntu_libs.libandroid.vintf.common import Hal
 from sebaubuntu_libs.libandroid.vintf.hidl import HidlHal
+from sebaubuntu_libs.libandroid.vintf.native import NativeHal
 
 def strcoll_hal(obj1: Hal, obj2: Hal) -> int:
 	# Sort by name if different
@@ -74,5 +75,7 @@ class Manifest:
 				self.entries.append(AidlHal.from_entry(entry))
 			elif hal_format == "hidl":
 				self.entries.append(HidlHal.from_entry(entry))
+			elif hal_format == "native":
+				self.entries.append(NativeHal.from_entry(entry))
 			else:
 				LOGW(f"Unknown HAL type {hal_format}")
