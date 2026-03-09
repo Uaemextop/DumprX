@@ -1,0 +1,131 @@
+name: Firmware Dump
+
+on:
+  workflow_dispatch:
+    inputs:
+      FIRMWARE_URL:
+        description: 'Firmware URL or direct download link'
+        required: true
+        type: string
+      UPLOAD_TO_GITHUB:
+        description: 'Upload extracted firmware to GitHub repository'
+        required: false
+        default: true
+        type: boolean
+      GIT_ORG:
+        description: 'GitHub organization or username for upload (leave empty to use repo owner)'
+        required: false
+        type: string
+      PUSH_TO_GITLAB:
+        description: 'Push to GitLab instead of GitHub'
+        required: false
+        default: false
+        type: boolean
+      GITLAB_INSTANCE:
+        description: 'GitLab instance URL (e.g. gitlab.com)'
+        required: false
+        type: string
+      TG_CHAT:
+        description: 'Telegram chat ID for notifications'
+        required: false
+        type: string
+      SPLIT_LARGE_FILES:
+        description: 'Split large files into parts (.aa, .ab, .ac) instead of using Git LFS'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  dump:
+    name: Extract Firmware
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    permissions:
+      contents: write
+
+    steps:
+      - name: '📥 Checkout repository'
+        uses: actions/checkout@v4
+
+      - name: '🔧 Install dependencies'
+        run: |
+          echo "::group::System packages"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            unace unrar zip unzip p7zip-full p7zip-rar sharutils rar \
+            uudeview mpack arj cabextract device-tree-compiler liblzma-dev \
+            python3-pip brotli liblz4-tool axel gawk aria2 detox cpio \
+            rename liblz4-dev jq git-lfs
+          echo "::endgroup::"
+
+          echo "::group::Git LFS"
+          git lfs install
+          echo "::endgroup::"
+
+          echo "::group::Python tooling (uv)"
+          if ! command -v uv > /dev/null 2>&1; then
+            curl -sL https://astral.sh/uv/install.sh | bash
+            export PATH="${HOME}/.local/bin:${PATH}"
+            echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+          fi
+          echo "::endgroup::"
+
+      - name: '🔑 Configure credentials'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Write token files for dumper.sh compatibility
+          if [ -n "${{ secrets.GITHUB_TOKEN }}" ]; then
+            echo "${{ secrets.GITHUB_TOKEN }}" > .github_token
+          fi
+
+          ORG_NAME="${{ inputs.GIT_ORG }}"
+          if [ -z "${ORG_NAME}" ]; then
+            ORG_NAME="${{ github.repository_owner }}"
+          fi
+          echo "${ORG_NAME}" > .github_orgname
+
+          if [ -n "${{ secrets.TG_TOKEN }}" ]; then
+            echo "${{ secrets.TG_TOKEN }}" > .tg_token
+          fi
+
+          TG_CHAT="${{ inputs.TG_CHAT }}"
+          if [ -n "${TG_CHAT}" ]; then
+            echo "${TG_CHAT}" > .tg_chat
+          fi
+
+          if [ "${{ inputs.PUSH_TO_GITLAB }}" = "true" ]; then
+            if [ -n "${{ secrets.GITLAB_TOKEN }}" ]; then
+              echo "${{ secrets.GITLAB_TOKEN }}" > .gitlab_token
+            fi
+            GITLAB_INSTANCE="${{ inputs.GITLAB_INSTANCE }}"
+            if [ -n "${GITLAB_INSTANCE}" ]; then
+              echo "${GITLAB_INSTANCE}" > .gitlab_instance
+            fi
+            echo "${ORG_NAME}" > .gitlab_group
+          fi
+
+      - name: '🚀 Run firmware dump'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GIT_ORG: ${{ inputs.GIT_ORG || github.repository_owner }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ inputs.TG_CHAT }}
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GITLAB_INSTANCE: ${{ inputs.GITLAB_INSTANCE }}
+          PUSH_TO_GITLAB: ${{ inputs.PUSH_TO_GITLAB }}
+          SPLIT_LARGE_FILES: ${{ inputs.SPLIT_LARGE_FILES }}
+          CI: true
+        run: |
+          chmod +x dumper.sh
+          bash dumper.sh '${{ inputs.FIRMWARE_URL }}'
+
+      - name: '📦 Upload extracted firmware as artifact'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-dump
+          path: out/
+          retention-days: 7
+          if-no-files-found: warn

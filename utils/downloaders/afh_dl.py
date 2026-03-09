@@ -1,18 +1,29 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from __future__ import absolute_import
-from __future__ import print_function
-from builtins import input
-
 import re
-import cgi
 import json
 import math
-import clint
 import argparse
-import humanize
-import requests
+import sys
+
+try:
+    import requests
+except ImportError:
+    print("Error: 'requests' module is required. Install with: pip install requests")
+    sys.exit(1)
+
+try:
+    import clint
+    HAS_CLINT = True
+except ImportError:
+    HAS_CLINT = False
+
+try:
+    import humanize
+    HAS_HUMANIZE = True
+except ImportError:
+    HAS_HUMANIZE = False
 
 mirror_url = r"https://androidfilehost.com/libs/otf/mirrors.otf.php"
 url_matchers = [
@@ -25,19 +36,41 @@ class Mirror:
 
 def download_file(url, fname, fsize):
     dat = requests.get(url, stream=True)
+    dat.raise_for_status()
+    downloaded = 0
     with open(fname, 'wb') as f:
-        bar = clint.textui.progress.bar(dat.iter_content(chunk_size=4096),
-                                        expected_size=math.floor(fsize / 4096) + 1)
-        for chunk in bar:
-            f.write(chunk)
-            f.flush()
+        if HAS_CLINT:
+            bar = clint.textui.progress.bar(dat.iter_content(chunk_size=4096),
+                                            expected_size=math.floor(fsize / 4096) + 1)
+            for chunk in bar:
+                f.write(chunk)
+                f.flush()
+        else:
+            for chunk in dat.iter_content(chunk_size=4096):
+                f.write(chunk)
+                downloaded += len(chunk)
+                pct = (downloaded / fsize * 100) if fsize > 0 else 0
+                print('\rDownloading: {:.1f}%'.format(pct), end='', flush=True)
+            print()
 
 def get_file_info(url):
     data = requests.head(url)
-    rsize = int(data.headers['Content-Length'])
-    size = humanize.naturalsize(rsize, binary=True)
-    ftype, fdata = cgi.parse_header(data.headers['Content-Disposition'])
-    return (rsize, size, fdata['filename'])
+    data.raise_for_status()
+    rsize = int(data.headers.get('Content-Length', 0))
+    if HAS_HUMANIZE:
+        size = humanize.naturalsize(rsize, binary=True)
+    else:
+        size = '{:.1f} MB'.format(rsize / (1024 * 1024))
+
+    # Parse Content-Disposition header without deprecated cgi module
+    disposition = data.headers.get('Content-Disposition', '')
+    fname = 'download'
+    if 'filename=' in disposition:
+        match = re.search(r'filename[*]?=["\']?([^"\';\s]+)', disposition)
+        if match:
+            fname = match.group(1)
+
+    return (rsize, size, fname)
 
 def download_servers(fid):
     cook = requests.get("https://androidfilehost.com/?fid={}".format(fid))
@@ -49,7 +82,7 @@ def download_servers(fid):
     mirror_headers = {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/63.0.3239.132 Safari/537.36"),
+                       "Chrome/120.0.0.0 Safari/537.36"),
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Referer": "https://androidfilehost.com/?fid={}".format(fid),
         "X-MOD-SBB-CTYPE": "xhr",
@@ -68,7 +101,7 @@ def download_servers(fid):
             for mirror in mirror_json["MIRRORS"]:
                 mirror_opts.append(Mirror(**mirror))
             return mirror_opts
-    except Exception as e:
+    except (json.JSONDecodeError, KeyError):
         return None
 
 def match_url(url):
@@ -87,7 +120,7 @@ def main(link=None):
         file_id = file_match.group('id')
         print("Obtaining available download servers...")
         servers = download_servers(file_id)
-        if servers == None:
+        if servers is None:
             print("Unable to retrieve download servers, you have probably been rate limited.")
             return
         svc = len(servers) - 1
@@ -114,9 +147,9 @@ def entry_main():
     parser.add_argument("-l", "--link", action="store", nargs="?", type=str, default=None,
                         help="Link that should be downloaded.")
     parsed = parser.parse_args()
-    if parsed.interactive == True:
+    if parsed.interactive:
         main()
-    elif not parsed.link == None:
+    elif parsed.link is not None:
         main(parsed.link)
     else:
         print("A link must be specified if not in interactive mode.")
