@@ -1677,43 +1677,47 @@ rm -rf "${TMPDIR}" 2>/dev/null
 commit_and_push(){
 	log_group_start "Git LFS Setup"
 
-	# Initialize Git LFS
-	git lfs install
+	# Initialize Git LFS (skip if git-lfs is not installed)
+	if command -v git-lfs &>/dev/null || git lfs version &>/dev/null; then
+		git lfs install
 
-	# Find files larger than 99MB and track them with Git LFS
-	log_info "Scanning for files larger than 99MB..."
-	LARGE_FILES_FOUND=false
-	LFS_THRESHOLD=103809024  # 99 MiB in bytes (stays under GitHub's 100MB limit)
+		# Find files larger than 99MB and track them with Git LFS
+		log_info "Scanning for files larger than 99MB..."
+		LARGE_FILES_FOUND=false
+		LFS_THRESHOLD=103809024  # 99 MiB in bytes (stays under GitHub's 100MB limit)
 
-	while IFS= read -r -d '' file; do
-		if [ -f "$file" ]; then
-			size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
-			if [ -n "$size" ] && [ "$size" -gt "$LFS_THRESHOLD" ]; then
-				LARGE_FILES_FOUND=true
-				size_mb=$((size / 1024 / 1024))
-				log_info "Found large file: $file (${size_mb}MB)"
-				git lfs track "$file"
+		while IFS= read -r -d '' file; do
+			if [ -f "$file" ]; then
+				size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
+				if [ -n "$size" ] && [ "$size" -gt "$LFS_THRESHOLD" ]; then
+					LARGE_FILES_FOUND=true
+					size_mb=$((size / 1024 / 1024))
+					log_info "Found large file: $file (${size_mb}MB)"
+					git lfs track "$file"
+				fi
 			fi
+		done < <(find . -type f -not -path "./.git/*" -print0)
+
+		if [ "$LARGE_FILES_FOUND" = true ]; then
+			log_success "Large files tracked with Git LFS"
+			log_info "Git LFS tracking patterns:"
+			cat .gitattributes
+		else
+			log_info "No files larger than 99MB found"
 		fi
-	done < <(find . -type f -not -path "./.git/*" -print0)
 
-	if [ "$LARGE_FILES_FOUND" = true ]; then
-		log_success "Large files tracked with Git LFS"
-		log_info "Git LFS tracking patterns:"
-		cat .gitattributes
+		[ -e ".gitattributes" ] && {
+			git add ".gitattributes"
+			git commit -sm "Setup Git LFS"
+			git push -u origin "${branch}" || log_warn "Failed to push LFS setup"
+		}
 	else
-		log_info "No files larger than 99MB found"
+		log_warn "Git LFS is not installed. Large files (>100MB) may fail to push."
 	fi
-
-	[ -e ".gitattributes" ] && {
-		git add ".gitattributes"
-		git commit -sm "Setup Git LFS"
-		git push -u origin "${branch}" || log_warn "Failed to push LFS setup"
-	}
 	log_group_end
 
 	# ── Chunked Push Logic ──
-	# Calculate total size and push in chunks up to 2GB
+	# Push in chunks up to 2GB. Check size BEFORE adding each dir to avoid exceeding limit.
 	local CHUNK_LIMIT=$((2 * 1024 * 1024 * 1024))  # 2GB in bytes
 	local current_chunk_size=0
 	local chunk_num=1
@@ -1743,6 +1747,19 @@ commit_and_push(){
 			apk_size=$((apk_size + fsize))
 		done <<< "${apk_files}"
 
+		# If APKs alone would exceed chunk limit after current, push first
+		if [ "$current_chunk_size" -gt 0 ] && [ "$((current_chunk_size + apk_size))" -ge "$CHUNK_LIMIT" ]; then
+			log_info "Chunk ${chunk_num} size: $((current_chunk_size / 1024 / 1024))MB - pushing..."
+			if ! git push -u origin "${branch}"; then
+				log_warn "Failed to push chunk ${chunk_num}"
+				push_failed=true
+			fi
+			current_chunk_size=0
+			chunk_num=$((chunk_num + 1))
+			log_group_end
+			log_group_start "Committing and Pushing (chunk ${chunk_num})"
+		fi
+
 		git add $(find . -type f -name '*.apk' -not -path "./.git/*")
 		git commit -sm "Add apps for ${description}"
 		current_chunk_size=$((current_chunk_size + apk_size))
@@ -1766,18 +1783,34 @@ commit_and_push(){
 		local dir_size=0
 		for prefix in "" "system/" "system/system/" "vendor/"; do
 			if [ -d "${prefix}${i}" ]; then
-				git add "${prefix}${i}"
-				dir_added=true
 				local prefix_size
 				prefix_size=$(du -sb "${prefix}${i}" 2>/dev/null | cut -f1 || echo 0)
 				dir_size=$((dir_size + prefix_size))
+				dir_added=true
 			fi
 		done
 
 		if [ "$dir_added" = true ]; then
+			# If adding this dir would exceed 2GB, push current chunk first
+			if [ "$current_chunk_size" -gt 0 ] && [ "$((current_chunk_size + dir_size))" -ge "$CHUNK_LIMIT" ]; then
+				log_info "Chunk ${chunk_num} size: $((current_chunk_size / 1024 / 1024))MB - pushing..."
+				if ! git push -u origin "${branch}"; then
+					log_warn "Failed to push chunk ${chunk_num}"
+					push_failed=true
+				fi
+				current_chunk_size=0
+				chunk_num=$((chunk_num + 1))
+				log_group_end
+				log_group_start "Committing and Pushing (chunk ${chunk_num})"
+			fi
+
+			for prefix in "" "system/" "system/system/" "vendor/"; do
+				[ -d "${prefix}${i}" ] && git add "${prefix}${i}"
+			done
 			git commit -sm "Add ${i} for ${description}"
 			current_chunk_size=$((current_chunk_size + dir_size))
 
+			# If this single dir already exceeds 2GB, push immediately
 			if [ "$current_chunk_size" -ge "$CHUNK_LIMIT" ]; then
 				log_info "Chunk ${chunk_num} size: $((current_chunk_size / 1024 / 1024))MB - pushing..."
 				if ! git push -u origin "${branch}"; then
