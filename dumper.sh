@@ -1538,17 +1538,23 @@ if [[ "$is_ab" = true ]]; then
 	if [ -f recovery.img ]; then
 		printf "Legacy A/B with recovery partition detected...\n"
 		twrpimg="recovery.img"
+	elif [ -f vendor_boot.img ]; then
+		# A/B devices with vendor_boot (v4 dual ramdisk) contain recovery in vendor_boot
+		printf "A/B device with vendor_boot (recovery in vendor_boot)...\n"
+		twrpimg="vendor_boot.img"
 	else
-	twrpimg="boot.img"
+		twrpimg="boot.img"
 	fi
 else
 	twrpimg="recovery.img"
 fi
 if [[ -f ${twrpimg} ]]; then
 	mkdir -p $twrpdtout
-	uvx --from git+https://github.com/twrpdtgen/twrpdtgen@master twrpdtgen $twrpimg -o $twrpdtout
-	if [[ "$?" = 0 ]]; then
-		[[ ! -e "${OUTDIR}"/twrp-device-tree/README.md ]] && curl https://raw.githubusercontent.com/wiki/SebaUbuntu/TWRP-device-tree-generator/4.-Build-TWRP-from-source.md > ${twrpdtout}/README.md
+	# Use local twrpdtgen with local sebaubuntu_libs
+	PYTHONPATH="${UTILSDIR}:${PYTHONPATH:-}" python3 -m twrpdtgen $twrpimg -o $twrpdtout 2>&1 || \
+		uvx --from git+https://github.com/twrpdtgen/twrpdtgen@master twrpdtgen $twrpimg -o $twrpdtout 2>&1 || true
+	if [[ -d "${twrpdtout}" ]]; then
+		[[ ! -e "${OUTDIR}"/twrp-device-tree/README.md ]] && curl -sL https://raw.githubusercontent.com/wiki/SebaUbuntu/TWRP-device-tree-generator/4.-Build-TWRP-from-source.md > ${twrpdtout}/README.md 2>/dev/null
 	fi
 fi
 
@@ -1564,7 +1570,9 @@ find "$OUTDIR" -type f -printf '%P\n' | sort | grep -v ".git/" > "$OUTDIR"/all_f
 if [[ "$treble_support" = true ]]; then
         aospdtout="aosp-device-tree"
         mkdir -p $aospdtout
-        uvx aospdtgen $OUTDIR -o $aospdtout
+        # Use local aospdtgen with local sebaubuntu_libs
+        PYTHONPATH="${UTILSDIR}:${PYTHONPATH:-}" python3 -m aospdtgen $OUTDIR -o $aospdtout 2>&1 || \
+            uvx aospdtgen $OUTDIR -o $aospdtout 2>&1 || true
 
         # Remove all .git directories from aospdtout
         rm -rf $(find $aospdtout -type d -name ".git")
