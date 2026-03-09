@@ -116,12 +116,14 @@ EXTERNAL_TOOLS=(
 )
 
 for tool_slug in "${EXTERNAL_TOOLS[@]}"; do
-	if ! [[ -d "${UTILSDIR}"/"${tool_slug#*/}" ]]; then
-		log_info "Cloning ${tool_slug}..."
-		git clone -q https://github.com/"${tool_slug}".git "${UTILSDIR}"/"${tool_slug#*/}"
-	else
+	tool_dir="${UTILSDIR}/${tool_slug#*/}"
+	if [[ -d "${tool_dir}/.git" ]] || [[ -f "${tool_dir}/.git" ]]; then
 		log_info "Updating ${tool_slug}..."
-		git -C "${UTILSDIR}"/"${tool_slug#*/}" pull -q
+		git -C "${tool_dir}" pull -q
+	else
+		[[ -d "${tool_dir}" ]] && rm -rf "${tool_dir}"
+		log_info "Cloning ${tool_slug}..."
+		git clone -q https://github.com/"${tool_slug}".git "${tool_dir}"
 	fi
 done
 
@@ -1647,20 +1649,24 @@ function write_sha1sum(){
 }
 
 # Generate proprietary-files.txt
-log_info "Generating proprietary-files.txt..."
-bash "${UTILSDIR}"/android_tools/tools/proprietary-files.sh "${OUTDIR}"/all_files.txt >/dev/null
-printf "# All blobs from %s, unless pinned\n" "${description}" > "${OUTDIR}"/proprietary-files.txt
-cat "${UTILSDIR}"/android_tools/working/proprietary-files.txt >> "${OUTDIR}"/proprietary-files.txt
+if [[ -f "${UTILSDIR}"/android_tools/tools/proprietary-files.sh ]]; then
+	log_info "Generating proprietary-files.txt..."
+	bash "${UTILSDIR}"/android_tools/tools/proprietary-files.sh "${OUTDIR}"/all_files.txt >/dev/null
+	printf "# All blobs from %s, unless pinned\n" "${description}" > "${OUTDIR}"/proprietary-files.txt
+	cat "${UTILSDIR}"/android_tools/working/proprietary-files.txt >> "${OUTDIR}"/proprietary-files.txt
 
-# Generate proprietary-files.sha1
-log_info "Generating proprietary-files.sha1..."
-printf "# All blobs are from \"%s\" and are pinned with sha1sum values\n" "${description}" > "${OUTDIR}"/proprietary-files.sha1
-write_sha1sum ${UTILSDIR}/android_tools/working/proprietary-files.{txt,sha1}
-cat "${UTILSDIR}"/android_tools/working/proprietary-files.sha1 >> "${OUTDIR}"/proprietary-files.sha1
+	# Generate proprietary-files.sha1
+	log_info "Generating proprietary-files.sha1..."
+	printf "# All blobs are from \"%s\" and are pinned with sha1sum values\n" "${description}" > "${OUTDIR}"/proprietary-files.sha1
+	write_sha1sum ${UTILSDIR}/android_tools/working/proprietary-files.{txt,sha1}
+	cat "${UTILSDIR}"/android_tools/working/proprietary-files.sha1 >> "${OUTDIR}"/proprietary-files.sha1
 
-# Stash the changes done at ${UTILSDIR}/android_tools
-git -C "${UTILSDIR}"/android_tools/ add --all
-git -C "${UTILSDIR}"/android_tools/ stash
+	# Stash the changes done at ${UTILSDIR}/android_tools
+	git -C "${UTILSDIR}"/android_tools/ add --all
+	git -C "${UTILSDIR}"/android_tools/ stash
+else
+	log_warn "android_tools not available, skipping proprietary-files generation"
+fi
 
 # Generate all_files.sha1
 log_info "Generating all_files.sha1..."
