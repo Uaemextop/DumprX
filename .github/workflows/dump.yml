@@ -27,10 +27,12 @@ on:
         type: string
       GIT_USER:
         description: 'GitHub username of the token owner (auto-detected if empty)'
+        default: 'EduardoC3677'
         required: false
         type: string
       GIT_EMAIL:
         description: 'Email for git commits (defaults to github-actions bot email)'
+        default: 'ealvarado2677@gmail.com'
         required: false
         type: string
       TG_CHAT:
